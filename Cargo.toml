@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
-members = ["load-balancer", "load-balancer-common", "load-balancer-ebpf"]
-default-members = ["load-balancer", "load-balancer-common"]
+members = ["load-balancer", "load-balancer-common", "load-balancer-ebpf", "agave-afxdp"]
+default-members = ["load-balancer", "load-balancer-common", "agave-afxdp"]
 
 [workspace.dependencies]
 aya = { version = "0.13.1", default-features = false }
@@ -15,10 +15,13 @@ anyhow = { version = "1", default-features = false }
 #
 # See https://github.com/clap-rs/clap/blob/61f5ee5/clap_builder/src/lib.rs#L15.
 clap = { version = "4.5.20", default-features = false, features = ["std"] }
+caps = "0.5.5"
+crossbeam-channel = "0.5.15"
 env_logger = { version = "0.11.5", default-features = false }
-libc = { version = "0.2.159", default-features = false }
+libc = { version = "0.2.159" }
 log = { version = "0.4.22", default-features = false }
 tokio = { version = "1.40.0", default-features = false }
+thiserror = "2.0.16"
 which = { version = "6.0.0", default-features = false }
 
 [profile.release.package.load-balancer-ebpf]
