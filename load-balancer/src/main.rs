@@ -1,13 +1,28 @@
+use std::os::fd::AsFd;
+
 use anyhow::Context as _;
-use aya::programs::{Xdp, XdpFlags};
+use aya::{
+    maps::{xdp::XskMap, MapError},
+    programs::{Xdp, XdpFlags},
+};
 use clap::Parser;
 #[rustfmt::skip]
 use log::{debug, warn};
+
+use agave_afxdp::{
+    device::{DeviceQueue, NetworkDevice, QueueId, RingSizes},
+    socket::Socket,
+    umem::{PageAlignedMemory, SliceUmem, Umem},
+};
 use tokio::signal;
+
+const FRAME_SIZE: usize = 4096;
+const FRAME_COUNT: usize = 4096;
+const RING_SIZE: usize = 4096;
 
 #[derive(Debug, Parser)]
 struct Opt {
-    #[clap(short, long, default_value = "eth0")]
+    #[clap(short, long, default_value = "lo")]
     iface: String,
 }
 
@@ -43,9 +58,80 @@ async fn main() -> anyhow::Result<()> {
     let Opt { iface } = opt;
     let program: &mut Xdp = ebpf.program_mut("load_balancer").unwrap().try_into()?;
     program.load()?;
-    program.attach(&iface, XdpFlags::default())
+    program.attach(&iface, XdpFlags::SKB_MODE)
         .context("failed to attach the XDP program with default flags - try changing XdpFlags::default() to XdpFlags::SKB_MODE")?;
 
+    // TODO: Maybe I could make this more dynamic by passing a string through
+    // config or CLI argument to specify the map name?
+    let mut xsk_map: XskMap<_> = if let Some(map) = ebpf.take_map("XSK_SOCKS") {
+        map.try_into()?
+    } else {
+        anyhow::bail!("failed to find XSK map");
+    };
+
+    let mut aligned_memory = PageAlignedMemory::alloc(FRAME_SIZE, FRAME_COUNT)
+        .expect("failed to allocate page aligned memory");
+
+    let network_device = NetworkDevice::new(&iface).expect("failed to find the network device");
+
+    let queue_id = QueueId(0);
+    let ring_sizes = RingSizes {
+        rx: RING_SIZE,
+        tx: RING_SIZE,
+    };
+
+    let device_queue = DeviceQueue::new(network_device.if_index(), queue_id, Some(ring_sizes));
+    let umem = SliceUmem::new(&mut aligned_memory, FRAME_SIZE as u32)?;
+
+    let (mut socket, rx, _tx) = Socket::new(
+        device_queue,
+        umem,
+        false,
+        RING_SIZE,
+        RING_SIZE,
+        RING_SIZE,
+        RING_SIZE,
+    )?;
+
+    // For the moment and due to the limitations of my hardware, I'm unable to use more than one RX queue
+    // however, I will refactor the code to support multiple queues in the future by using more threads.
+    match xsk_map.set(0, socket.as_fd(), 0) {
+        Ok(_) => {}
+        Err(MapError::OutOfBounds { index, max_entries }) => {
+            // I have to decide what will this do when we start to use threads. Should I panic or simply stop the thread?
+            todo!("The XSK map is misconfigured: tried to access index {index} but the map only has {max_entries} entries.");
+        }
+        Err(err) => {
+            return Err(err.into());
+        }
+    };
+    let mut frames = vec![];
+    let umem = socket.umem();
+    while let Some(frame) = umem.reserve() {
+        frames.push(frame);
+    }
+    let mut fill_ring = rx.fill;
+    for frame in frames {
+        fill_ring
+            .write(frame)
+            .expect("failed to write frame to fill ring");
+    }
+    fill_ring.sync(true);
+
+    let mut rx_ring = rx.ring.unwrap();
+    rx_ring.sync(false);
+
+    println!(
+        "RX ring available and capacity frames: {} {}",
+        rx_ring.available(),
+        rx_ring.capacity()
+    );
+    loop {
+        rx_ring.sync(false);
+        while let Some(packet) = rx_ring.read() {
+            println!("Received a packet of size: {}", packet.len);
+        }
+    }
     let ctrl_c = signal::ctrl_c();
     println!("Waiting for Ctrl-C...");
     ctrl_c.await?;

@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 load-balancer-common = { path = "../load-balancer-common" }
+network-types = "0.0.8"
 
 aya-ebpf = { workspace = true }
 aya-log-ebpf = { workspace = true }

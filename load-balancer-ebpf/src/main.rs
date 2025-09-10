@@ -1,7 +1,12 @@
 #![no_std]
 #![no_main]
 
-use aya_ebpf::{bindings::xdp_action, macros::xdp, programs::XdpContext};
+use aya_ebpf::{
+    bindings::xdp_action,
+    macros::{map, xdp},
+    maps::xdp::XskMap,
+    programs::XdpContext,
+};
 use aya_log_ebpf::info;
 use core::mem;
 use network_types::{
@@ -10,6 +15,9 @@ use network_types::{
     // tcp::TcpHdr,
     // udp::UdpHdr,
 };
+
+#[map(name = "XSK_SOCKS")]
+static XSK_SOCKS: XskMap = XskMap::with_max_entries(12, 0);
 
 #[xdp]
 pub fn load_balancer(ctx: XdpContext) -> u32 {
@@ -35,7 +43,12 @@ fn try_load_balancer(ctx: XdpContext) -> Result<u32, ()> {
         IpProto::Tcp => {
             // let tcphdr: *const TcpHdr = ptr_at(&ctx, EthHdr::LEN + Ipv4Hdr::LEN)?;
             info!(&ctx, "TCP PACKET RECEIVED");
-            Ok(xdp_action::XDP_PASS)
+
+            let queue_id = unsafe { (*ctx.ctx).rx_queue_index };
+            let code_value = XSK_SOCKS
+                .redirect(queue_id, 0)
+                .unwrap_or(xdp_action::XDP_ABORTED);
+            Ok(code_value)
         }
         IpProto::Udp => Ok(xdp_action::XDP_PASS),
         _ => Err(()),
