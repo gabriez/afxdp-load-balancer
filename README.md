@@ -7,9 +7,9 @@ This a personal project to grasp a better understanding of TCP connections using
 
 ## Recommendations
 
-I'm open to receive feedback from fellows more experienced in this area than me. 
+I'm open to receive any feedback.
 
-# How to runload-balancer
+# How to run load-balancer
 
 ## Prerequisites
 
