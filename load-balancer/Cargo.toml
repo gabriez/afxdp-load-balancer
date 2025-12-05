@@ -16,7 +16,6 @@ log = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "net", "signal"] }
 
 clap = { workspace = true, features = ["derive"] }
-agave-xdp = "2.3.7"
 [build-dependencies]
 anyhow = { workspace = true }
 aya-build = { workspace = true }

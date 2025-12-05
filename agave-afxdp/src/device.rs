@@ -330,9 +330,27 @@ impl RingProducer {
 #[repr(C)]
 #[derive(Debug, Clone)]
 pub struct XdpDesc {
-    pub addr: u64,
-    pub len: u32,
-    pub options: u32,
+    addr: u64,
+    len: u32,
+    options: u32,
+}
+
+impl XdpDesc {
+    pub fn len(&self) -> usize {
+        self.len as usize
+    }
+
+    pub fn addr(&self) -> u64 {
+        self.addr
+    }
+
+    pub fn options(&self) -> u32 {
+        self.options
+    }
+
+    pub fn build(addr: u64, len: u32, options: u32) -> Self {
+        Self { addr, len, options }
+    }
 }
 
 pub struct TxCompletionRing {

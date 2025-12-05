@@ -12,7 +12,7 @@ use log::{debug, warn};
 use agave_afxdp::{
     device::{DeviceQueue, NetworkDevice, QueueId, RingSizes},
     socket::Socket,
-    umem::{PageAlignedMemory, SliceUmem, Umem},
+    umem::{Frame, PageAlignedMemory, SliceUmem, SliceUmemFrame, Umem},
 };
 use tokio::signal;
 
@@ -83,7 +83,7 @@ async fn main() -> anyhow::Result<()> {
     let device_queue = DeviceQueue::new(network_device.if_index(), queue_id, Some(ring_sizes));
     let umem = SliceUmem::new(&mut aligned_memory, FRAME_SIZE as u32)?;
 
-    let (mut socket, rx, _tx) = Socket::new(
+    let (mut socket, rx, tx) = Socket::new(
         device_queue,
         umem,
         false,
@@ -120,6 +120,7 @@ async fn main() -> anyhow::Result<()> {
 
     let mut rx_ring = rx.ring.unwrap();
     rx_ring.sync(false);
+    let mut tx_ring = tx.ring.unwrap();
 
     println!(
         "RX ring available and capacity frames: {} {}",
@@ -128,8 +129,29 @@ async fn main() -> anyhow::Result<()> {
     );
     loop {
         rx_ring.sync(false);
+
         while let Some(packet) = rx_ring.read() {
-            println!("Received a packet of size: {}", packet.len);
+            println!("Received a packet of size: {}", packet.len());
+
+            // let frame = packet.addr();
+            // packet.len
+            let slice_frame = SliceUmemFrame::from(packet);
+            let frame_offset = slice_frame.offset();
+
+            match tx_ring.write(slice_frame, 0) {
+                Ok(_) => {}
+                Err(_) => {
+                    println!("TX ring is full, dropping packet");
+                    umem.release(frame_offset);
+                }
+            }
+
+            match tx_ring.wake() {
+                Ok(_) => {}
+                Err(_) => {
+                    println!("Failed to wake TX ring");
+                }
+            }
         }
     }
     let ctrl_c = signal::ctrl_c();

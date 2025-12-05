@@ -4,7 +4,7 @@
 use aya_ebpf::{
     bindings::xdp_action,
     macros::{map, xdp},
-    maps::xdp::XskMap,
+    maps::{xdp::XskMap, HashMap},
     programs::XdpContext,
 };
 use aya_log_ebpf::info;
@@ -18,6 +18,9 @@ use network_types::{
 
 #[map(name = "XSK_SOCKS")]
 static XSK_SOCKS: XskMap = XskMap::with_max_entries(12, 0);
+
+#[map(name = "FILTER_PORTS")]
+static FILTER_PORTS: HashMap<u16, u8> = HashMap::with_max_entries(1024, 0);
 
 #[xdp]
 pub fn load_balancer(ctx: XdpContext) -> u32 {
