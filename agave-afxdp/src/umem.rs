@@ -42,6 +42,7 @@ pub trait Umem {
     }
 }
 
+#[derive(Debug)]
 pub struct SliceUmemFrame<'a> {
     pub offset: usize,
     pub len: usize,
