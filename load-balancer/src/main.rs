@@ -11,7 +11,7 @@ use log::{debug, warn};
 
 use agave_afxdp::{
     device::{DeviceQueue, NetworkDevice, QueueId, RingSizes},
-    socket::Socket,
+    socket::{Socket, TxRing},
     umem::{Frame, PageAlignedMemory, SliceUmem, SliceUmemFrame, Umem},
 };
 use tokio::signal;
@@ -131,12 +131,11 @@ async fn main() -> anyhow::Result<()> {
         rx_ring.sync(false);
 
         while let Some(packet) = rx_ring.read() {
-            println!("Received a packet of size: {}", packet.len());
-
             // let frame = packet.addr();
             // packet.len
             let slice_frame = SliceUmemFrame::from(packet);
             let frame_offset = slice_frame.offset();
+            // println!("Received a packet of size: {:?}", slice_frame);
 
             match tx_ring.write(slice_frame, 0) {
                 Ok(_) => {}
@@ -145,13 +144,19 @@ async fn main() -> anyhow::Result<()> {
                     umem.release(frame_offset);
                 }
             }
+            tx_ring.commit();
+
+            kick(&tx_ring);
 
             match tx_ring.wake() {
-                Ok(_) => {}
+                Ok(_) => {
+                    println!("TX ring waked");
+                }
                 Err(_) => {
                     println!("Failed to wake TX ring");
                 }
             }
+            rx_ring.sync(true);
         }
     }
     let ctrl_c = signal::ctrl_c();
@@ -160,4 +165,34 @@ async fn main() -> anyhow::Result<()> {
     println!("Exiting...");
 
     Ok(())
+}
+
+// With some drivers, or always when we work in SKB mode, we need to explicitly kick the driver once
+// we want the NIC to do something.
+#[inline(always)]
+fn kick(ring: &TxRing<SliceUmemFrame<'_>>) {
+    if !ring.needs_wakeup() {
+        return;
+    }
+
+    if let Err(e) = ring.wake() {
+        kick_error(e);
+    }
+}
+
+#[inline(never)]
+fn kick_error(e: std::io::Error) {
+    match e.raw_os_error() {
+        // these are non-fatal errors
+        Some(libc::EBUSY | libc::ENOBUFS | libc::EAGAIN) => {}
+        // this can temporarily happen with some drivers when changing
+        // settings (eg with ethtool)
+        Some(libc::ENETDOWN) => {
+            log::warn!("network interface is down")
+        }
+        // we should never get here, hopefully the driver recovers?
+        _ => {
+            log::error!("network interface driver error: {e:?}");
+        }
+    }
 }
