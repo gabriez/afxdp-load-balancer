@@ -16,6 +16,7 @@ log = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "net", "signal"] }
 
 clap = { workspace = true, features = ["derive"] }
+thiserror.workspace = true
 [build-dependencies]
 anyhow = { workspace = true }
 aya-build = { workspace = true }

@@ -469,6 +469,7 @@ dependencies = [
  "load-balancer-common",
  "load-balancer-ebpf",
  "log",
+ "thiserror 2.0.16",
  "tokio",
 ]
 

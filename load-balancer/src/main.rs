@@ -6,6 +6,7 @@ use aya::{
     programs::{Xdp, XdpFlags},
 };
 use clap::Parser;
+use load_balancer::process::{FramesManager, FRAME_COUNT};
 #[rustfmt::skip]
 use log::{debug, warn};
 
@@ -17,7 +18,6 @@ use agave_afxdp::{
 use tokio::signal;
 
 const FRAME_SIZE: usize = 4096;
-const FRAME_COUNT: usize = 4096;
 const RING_SIZE: usize = 4096;
 
 #[derive(Debug, Parser)]
@@ -32,8 +32,6 @@ async fn main() -> anyhow::Result<()> {
 
     env_logger::init();
 
-    // Bump the memlock rlimit. This is needed for older kernels that don't use the
-    // new memcg based accounting, see https://lwn.net/Articles/837122/
     let rlim = libc::rlimit {
         rlim_cur: libc::RLIM_INFINITY,
         rlim_max: libc::RLIM_INFINITY,
@@ -43,16 +41,11 @@ async fn main() -> anyhow::Result<()> {
         debug!("remove limit on locked memory failed, ret is: {}", ret);
     }
 
-    // This will include your eBPF object file as raw bytes at compile-time and load it at
-    // runtime. This approach is recommended for most real-world use cases. If you would
-    // like to specify the eBPF program at runtime rather than at compile-time, you can
-    // reach for `Bpf::load_file` instead.
     let mut ebpf = aya::Ebpf::load(aya::include_bytes_aligned!(concat!(
         env!("OUT_DIR"),
         "/load-balancer"
     )))?;
     if let Err(e) = aya_log::EbpfLogger::init(&mut ebpf) {
-        // This can happen if you remove all log statements from your eBPF program.
         warn!("failed to initialize eBPF logger: {}", e);
     }
     let Opt { iface } = opt;
@@ -61,14 +54,13 @@ async fn main() -> anyhow::Result<()> {
     program.attach(&iface, XdpFlags::SKB_MODE)
         .context("failed to attach the XDP program with default flags - try changing XdpFlags::default() to XdpFlags::SKB_MODE")?;
 
-    // TODO: Maybe I could make this more dynamic by passing a string through
-    // config or CLI argument to specify the map name?
     let mut xsk_map: XskMap<_> = if let Some(map) = ebpf.take_map("XSK_SOCKS") {
         map.try_into()?
     } else {
         anyhow::bail!("failed to find XSK map");
     };
 
+    // Mover aligned_memory fuera del alcance inmediato
     let mut aligned_memory = PageAlignedMemory::alloc(FRAME_SIZE, FRAME_COUNT)
         .expect("failed to allocate page aligned memory");
 
@@ -93,25 +85,26 @@ async fn main() -> anyhow::Result<()> {
         RING_SIZE,
     )?;
 
-    // For the moment and due to the limitations of my hardware, I'm unable to use more than one RX queue
-    // however, I will refactor the code to support multiple queues in the future by using more threads.
     match xsk_map.set(0, socket.as_fd(), 0) {
         Ok(_) => {}
         Err(MapError::OutOfBounds { index, max_entries }) => {
-            // I have to decide what will this do when we start to use threads. Should I panic or simply stop the thread?
             todo!("The XSK map is misconfigured: tried to access index {index} but the map only has {max_entries} entries.");
         }
         Err(err) => {
             return Err(err.into());
         }
     };
-    let mut frames = vec![];
+
+    let mut frames_manager = FramesManager::new();
+
     let umem = socket.umem();
-    while let Some(frame) = umem.reserve() {
-        frames.push(frame);
-    }
+    frames_manager
+        .insert_frames_from_umem(umem)
+        .expect("failed to insert frames from umem");
+
     let mut fill_ring = rx.fill;
-    for frame in frames {
+
+    for frame in frames_manager {
         fill_ring
             .write(frame)
             .expect("failed to write frame to fill ring");
@@ -131,11 +124,8 @@ async fn main() -> anyhow::Result<()> {
         rx_ring.sync(false);
 
         while let Some(packet) = rx_ring.read() {
-            // let frame = packet.addr();
-            // packet.len
             let slice_frame = SliceUmemFrame::from(packet);
             let frame_offset = slice_frame.offset();
-            // println!("Received a packet of size: {:?}", slice_frame);
 
             match tx_ring.write(slice_frame, 0) {
                 Ok(_) => {}
