@@ -296,11 +296,11 @@ impl<F: Frame> TxRing<F> {
         let index = index & self.size.saturating_sub(1);
         unsafe {
             let desc = self.mmap.desc.add(index as usize);
-            desc.write(XdpDesc {
-                addr: frame.offset().0 as u64,
-                len: frame.len() as u32,
+            desc.write(XdpDesc::build(
+                frame.offset().0 as u64,
+                frame.len() as u32,
                 options,
-            });
+            ));
         }
         Ok(())
     }

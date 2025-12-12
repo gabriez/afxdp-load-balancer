@@ -30,20 +30,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "agave-xdp"
-version = "2.3.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b580f01d9493f381ad7dc28a57717359152fd0e61428df5a635dbcaa7c6c69a6"
-dependencies = [
- "aya",
- "caps",
- "crossbeam-channel",
- "libc",
- "log",
- "thiserror 2.0.16",
-]
-
-[[package]]
 name = "allocator-api2"
 version = "0.2.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -473,7 +459,6 @@ name = "load-balancer"
 version = "0.1.0"
 dependencies = [
  "agave-afxdp",
- "agave-xdp",
  "anyhow",
  "aya",
  "aya-build",
@@ -484,6 +469,7 @@ dependencies = [
  "load-balancer-common",
  "load-balancer-ebpf",
  "log",
+ "thiserror 2.0.16",
  "tokio",
 ]
 
