@@ -120,6 +120,14 @@ async fn main() -> anyhow::Result<()> {
         rx_ring.available(),
         rx_ring.capacity()
     );
+
+    // TODO: maybe i should move this operations into a separate async task to be able to handle ctrl-c properly and exit the program
+    // Also i should implement a way to refill the fill ring when frames are consumed
+    // And for the end, I must check if it's better to use parallel programming or not to improve performance.
+    // Which libraries would be better for that purpose?
+    // Tokio seems to be a good option, but maybe there are others more suitable for high-performance networking applications.
+    // Rayon to work with parallel iterators?
+
     loop {
         rx_ring.sync(false);
 
