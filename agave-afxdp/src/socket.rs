@@ -131,7 +131,10 @@ impl<U: Umem> Socket<U> {
                     let Some(frame) = umem.reserve() else {
                         return Err(io::Error::other("Failed to reserve frame for RX fill ring"));
                     };
-                    rx_fill_ring.write(frame)?;
+                    match rx_fill_ring.write(frame) {
+                        Ok(()) => {}
+                        Err((_, err)) => return Err(err),
+                    }
                 }
                 rx_fill_ring.commit();
             }
@@ -305,18 +308,6 @@ impl<F: Frame> TxRing<F> {
         Ok(())
     }
 
-    pub fn needs_wakeup(&self) -> bool {
-        unsafe { (*self.mmap.flags).load(Ordering::Relaxed) & XDP_RING_NEED_WAKEUP != 0 }
-    }
-
-    pub fn wake(&self) -> Result<u64, io::Error> {
-        let result = unsafe { sendto(self.fd, ptr::null(), 0, libc::MSG_DONTWAIT, ptr::null(), 0) };
-        if result < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(result as u64)
-    }
-
     pub fn capacity(&self) -> usize {
         self.size as usize
     }
@@ -331,6 +322,18 @@ impl<F: Frame> TxRing<F> {
 
     pub fn sync(&mut self, commit: bool) {
         self.producer.sync(commit);
+    }
+
+    pub fn needs_wakeup(&self) -> bool {
+        unsafe { (*self.mmap.flags).load(Ordering::Relaxed) & XDP_RING_NEED_WAKEUP != 0 }
+    }
+
+    pub fn wake(&self) -> Result<u64, io::Error> {
+        let result = unsafe { sendto(self.fd, ptr::null(), 0, libc::MSG_DONTWAIT, ptr::null(), 0) };
+        if result < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(result as u64)
     }
 }
 

@@ -6,7 +6,7 @@ use {
     },
     libc::{
         ifreq, mmap, munmap, socket, syscall, xdp_ring_offset, SYS_ioctl, AF_INET, IF_NAMESIZE,
-        SIOCETHTOOL, SIOCGIFADDR, SIOCGIFHWADDR, SOCK_DGRAM,
+        SIOCETHTOOL, SIOCGIFADDR, SIOCGIFHWADDR, SOCK_DGRAM, XDP_RING_NEED_WAKEUP,
     },
     std::{
         ffi::{c_char, CStr, CString},
@@ -388,7 +388,7 @@ pub struct RxFillRing<F: Frame> {
     mmap: RingMmap<u64>,
     producer: RingProducer,
     size: u32,
-    _fd: RawFd,
+    fd: RawFd,
     _frame: PhantomData<F>,
 }
 
@@ -399,14 +399,14 @@ impl<F: Frame> RxFillRing<F> {
             producer: RingProducer::new(mmap.producer, mmap.consumer, size),
             mmap,
             size,
-            _fd: fd,
+            fd,
             _frame: PhantomData,
         }
     }
 
-    pub fn write(&mut self, frame: F) -> Result<(), io::Error> {
+    pub fn write(&mut self, frame: F) -> Result<(), (F, io::Error)> {
         let Some(index) = self.producer.produce() else {
-            return Err(ErrorKind::StorageFull.into());
+            return Err((frame, ErrorKind::StorageFull.into()));
         };
         let index = index & self.size.saturating_sub(1);
         let desc = unsafe { self.mmap.desc.add(index as usize) };
@@ -422,8 +422,23 @@ impl<F: Frame> RxFillRing<F> {
         self.producer.commit();
     }
 
-    pub fn sync(&mut self, commit: bool) {
-        self.producer.sync(commit);
+    pub fn needs_wakeup(&self) -> bool {
+        unsafe { (*self.mmap.flags).load(Ordering::Relaxed) & XDP_RING_NEED_WAKEUP != 0 }
+    }
+
+    pub fn wake(&mut self) -> Result<u64, io::Error> {
+        let mut poll = libc::pollfd {
+            fd: self.fd,
+            events: 0,
+            revents: 0,
+        };
+
+        let res = unsafe { libc::poll(&mut poll as *mut _, 1, 0) };
+        if res > 0 {
+            return Err(io::Error::last_os_error());
+        }
+
+        Ok(res as u64)
     }
 }
 
