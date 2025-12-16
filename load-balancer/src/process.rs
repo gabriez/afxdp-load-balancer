@@ -9,16 +9,20 @@ pub enum FramesError {
 }
 pub struct FramesManager<'a> {
     max_frames: usize,
-    frame_available: usize,
+    pub frame_available: usize,
     frames: Vec<Option<SliceUmemFrame<'a>>>,
 }
 
 impl<'a> FramesManager<'a> {
     pub fn new() -> Self {
+        let mut frames = Vec::with_capacity(FRAME_COUNT);
+        for _ in 0..FRAME_COUNT {
+            frames.push(None);
+        }
         FramesManager {
             max_frames: FRAME_COUNT,
             frame_available: 0,
-            frames: Vec::with_capacity(FRAME_COUNT),
+            frames,
         }
     }
 
@@ -34,6 +38,7 @@ impl<'a> FramesManager<'a> {
         }
     }
 
+    #[inline(always)]
     pub fn insert_frame(&mut self, frame: SliceUmemFrame<'a>) -> Result<(), FramesError> {
         if self.frame_available < self.max_frames {
             self.frames[self.frame_available] = Some(frame);
@@ -44,6 +49,7 @@ impl<'a> FramesManager<'a> {
         }
     }
 
+    #[inline(always)]
     pub fn get_free_frame(&mut self) -> Option<SliceUmemFrame<'a>> {
         if self.frame_available > 0 {
             self.frame_available -= 1;

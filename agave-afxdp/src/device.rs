@@ -422,6 +422,10 @@ impl<F: Frame> RxFillRing<F> {
         self.producer.commit();
     }
 
+    pub fn sync(&mut self, commit: bool) {
+        self.producer.sync(commit);
+    }
+
     pub fn needs_wakeup(&self) -> bool {
         unsafe { (*self.mmap.flags).load(Ordering::Relaxed) & XDP_RING_NEED_WAKEUP != 0 }
     }
@@ -434,7 +438,7 @@ impl<F: Frame> RxFillRing<F> {
         };
 
         let res = unsafe { libc::poll(&mut poll as *mut _, 1, 0) };
-        if res > 0 {
+        if res < 0 {
             return Err(io::Error::last_os_error());
         }
 

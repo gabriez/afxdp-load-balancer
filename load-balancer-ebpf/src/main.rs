@@ -47,7 +47,7 @@ fn try_load_balancer(ctx: XdpContext) -> Result<u32, ()> {
             let tcphdr: *const TcpHdr = ptr_at(&ctx, EthHdr::LEN + Ipv4Hdr::LEN)?;
             let port = unsafe { (*tcphdr).source.to_be() };
             if port == 1299 {
-                info!(&ctx, "TCP PACKET RECEIVED");
+                // info!(&ctx, "TCP PACKET RECEIVED");
                 let queue_id = unsafe { (*ctx.ctx).rx_queue_index };
                 let code_value = XSK_SOCKS
                     .redirect(queue_id, 0)

@@ -1,5 +1,6 @@
 [workspace]
 resolver = "2"
+authors=["Gabriel Torres"]
 members = ["load-balancer", "load-balancer-common", "load-balancer-ebpf", "agave-afxdp"]
 default-members = ["load-balancer", "load-balancer-common", "agave-afxdp"]
 
