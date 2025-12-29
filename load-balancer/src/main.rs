@@ -1,9 +1,9 @@
 use {
     agave_afxdp::{
         device::{DeviceQueue, NetworkDevice, QueueId, RingSizes},
-        socket::Socket,
-        tx_loop::{kick, kick_error},
-        umem::{PageAlignedMemory, SliceUmem, SliceUmemFrame, Umem},
+        socket::{RingFull, Socket},
+        tx_loop::kick,
+        umem::{Frame, PageAlignedMemory, SliceUmem, SliceUmemFrame, Umem},
     },
     anyhow::Context as _,
     aya::{
@@ -145,12 +145,6 @@ fn build_thread_tx_loop(
         let mut tx_ring = tx.ring.unwrap();
         rx_ring.sync(false);
 
-        println!(
-            "RX ring available and capacity frames: {} {}",
-            rx_ring.available(),
-            rx_ring.capacity()
-        );
-
         // TODO: maybe i should move this operations into a separate async task to be able to handle ctrl-c properly and exit the program
         // Also i should implement a way to refill the fill ring when frames are consumed
         // And for the end, I must check if it's better to use parallel programming or not to improve performance.
@@ -162,6 +156,7 @@ fn build_thread_tx_loop(
         loop {
             rx_ring.sync(false);
             tx_ring.sync(false);
+
             let mut packets_written = 0;
 
             let available_packets = rx_ring.available();
@@ -169,49 +164,55 @@ fn build_thread_tx_loop(
                 while let Some(packet) = rx_ring.read() {
                     let slice_frame = SliceUmemFrame::from(packet);
 
-                    if let Ok(_) = tx_ring.write(slice_frame, 0) {
-                        packets_written += 1;
+                    let available_tx = tx_ring.available();
+
+                    // If by any reason tx_ring does not have any available frame, we're gonna kick it to try to free some space
+                    if available_tx == 0 {
+                        tx_ring.commit();
+                        kick(&tx_ring);
+                        tx_ring.sync(false);
+                    }
+
+                    match tx_ring.write(slice_frame, 0) {
+                        Ok(_) => {
+                            packets_written += 1;
+                        }
+                        Err(RingFull(frame_ret)) => {
+                            umem.release(frame_ret.offset());
+                        }
                     }
                 }
 
-                rx_ring.commit();
-
                 if packets_written > 0 {
                     tx_ring.commit();
+
                     kick(&tx_ring);
                 }
+
+                rx_ring.commit();
             }
 
-            let available_packets2 = rx_ring.available();
-            println!("available packets after read: {}", available_packets2);
-
+            // Completion Ring
             completion_ring.sync(false);
             while let Some(completed_frame) = completion_ring.read() {
                 umem.release(completed_frame);
             }
             completion_ring.commit();
 
+            // Frame recycling
             let available_frames = umem.available();
-            if available_frames > 0 {
-                // println!("available frames: {}", available_frames);
 
+            if available_frames > 0 {
                 if let Err(err) = frames_manager.insert_frames_from_umem(umem) {
-                    println!("Failed to insert frames from umem: {}", err);
+                    warn!("Failed to insert frames from umem: {}", err);
                 }
 
                 insert_frames_fill_ring(&mut fill_ring, &mut frames_manager);
 
                 if fill_ring.needs_wakeup() {
-                    println!("Needs wakeup fill ring");
-                    if let Err(err) = fill_ring.wake() {
-                        kick_error(err);
-                        continue;
-                    }
-                    println!("fill ring waked");
+                    fill_ring.wake()?;
                 }
-
-                // ⚠️ CRÍTICO: Hacer sync DEL FILL RING para que el kernel vea los frames
-                fill_ring.sync(false); // Actualiza consumer después de commit
+                fill_ring.sync(false);
             }
         }
     };
@@ -227,7 +228,6 @@ fn insert_frames_fill_ring<'a>(
     fill_ring: &mut agave_afxdp::device::RxFillRing<SliceUmemFrame<'a>>,
     frames_manager: &mut FramesManager<'a>,
 ) {
-    let mut _inserted = 0;
     while let Some(frame) = frames_manager.get_free_frame() {
         if let Err((frame_ret, err)) = fill_ring.write(frame) {
             warn!(
@@ -239,9 +239,7 @@ fn insert_frames_fill_ring<'a>(
                 .expect("Failed to return frame to manager");
             break;
         }
-        _inserted += 1;
     }
-    // println!("✓ Inserted {} frames into fill_ring", inserted);
 
     fill_ring.commit();
 }

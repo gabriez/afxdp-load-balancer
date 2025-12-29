@@ -404,6 +404,7 @@ impl<F: Frame> RxFillRing<F> {
         }
     }
 
+    /// Writes a frame into the fill ring.
     pub fn write(&mut self, frame: F) -> Result<(), (F, io::Error)> {
         let Some(index) = self.producer.produce() else {
             return Err((frame, ErrorKind::StorageFull.into()));
@@ -418,18 +419,28 @@ impl<F: Frame> RxFillRing<F> {
         Ok(())
     }
 
+    /// Returns the number of available slots in the ring.
+    pub fn available(&self) -> u32 {
+        self.producer.available()
+    }
+
+    /// Commits the produced entries to the ring.
     pub fn commit(&mut self) {
         self.producer.commit();
     }
 
+    /// Sync entries with the kernel driver.
+    /// If commit is true, commits the produced entries before syncing.
     pub fn sync(&mut self, commit: bool) {
         self.producer.sync(commit);
     }
 
+    /// Checks if rings needs to be wake up
     pub fn needs_wakeup(&self) -> bool {
         unsafe { (*self.mmap.flags).load(Ordering::Relaxed) & XDP_RING_NEED_WAKEUP != 0 }
     }
 
+    /// Wakes up the kernel driver to keep processing packets in the ring
     pub fn wake(&mut self) -> Result<u64, io::Error> {
         let mut poll = libc::pollfd {
             fd: self.fd,
