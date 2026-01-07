@@ -1,5 +1,8 @@
-use agave_afxdp::umem::{SliceUmemFrame, Umem};
-use thiserror::Error;
+use {
+    agave_afxdp::umem::{SliceUmemFrame, Umem},
+    thiserror::Error,
+};
+
 pub const FRAME_COUNT: usize = 4096;
 
 #[derive(Error, Debug)]

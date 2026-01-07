@@ -1,4 +1,11 @@
 use {
+    // internet_checksum::update,
+    internet_checksum::update,
+    network_types::{
+        eth::EthHdr,
+        ip::Ipv4Hdr,
+        tcp::{self, TcpHdr},
+    },
     std::{
         collections::HashMap,
         fmt,
@@ -223,3 +230,79 @@ impl ConnectionsManager {
 // TODO: Still to be implemented. I need to study how to manage connections and the best patterns to follow in this case.
 // I can use this guide: https://www.rfc-editor.org/rfc/rfc793.html and this one too https://medium.com/@itherohit/tcp-connection-establishment-an-in-depth-exploration-46031ef69908
 // Also, I could check how other load balancers do it, like HAProxy and NGINX.
+
+// These are temporary methods, I will refactor them later to use them inside the NAT table and connection manager structures.
+pub fn shift_mac(frame_data: &mut [u8]) {
+    let eth_hdr = unsafe { &mut *(frame_data.as_mut_ptr() as *mut EthHdr) };
+    let src_mac = eth_hdr.src_addr;
+    let dst_mac = eth_hdr.dst_addr;
+
+    eth_hdr.src_addr = dst_mac;
+    eth_hdr.dst_addr = src_mac;
+}
+
+// To implement checksum update I'm using internet-checksum. This crate is optimized to calculate checksums efficiently and take advantage of CPU.
+// You can check the code on the following link https://docs.rs/internet-checksum/0.2.1/src/internet_checksum/lib.rs.html
+
+// TODO: implement this method inside NAT Table to route packets according to NAT entries
+
+#[inline(always)]
+pub fn route_packet(frame_data: &mut [u8], ip_dest: [u8; 4], port_dest: u16) -> bool {
+    const MIN_IPV4_HEADER_LEN: usize = 20;
+
+    let eth_hdr = unsafe { std::ptr::read_unaligned(frame_data.as_ptr() as *const EthHdr) };
+    let ether_type = eth_hdr.ether_type;
+
+    // TODO: Maybe I should use likely here to avoid overhead by branch prediction.
+    // Anyway, I don't think this check will be a bottleneck.
+    // Because most of the traffic will be TCP filtered by XDP program
+    if ether_type != network_types::eth::EtherType::Ipv4 {
+        return false;
+    }
+
+    let ipv4_hdr = unsafe { &mut *(frame_data.as_mut_ptr().add(EthHdr::LEN) as *mut Ipv4Hdr) };
+
+    // TODO: Maybe I should use likely here to avoid overhead by branch prediction.
+    // Anyway, I don't think this check will be a bottleneck.
+    // Because most of the traffic will be TCP filtered by XDP program
+    if ipv4_hdr.proto != network_types::ip::IpProto::Tcp {
+        return false;
+    }
+
+    let old_dst_ip = ipv4_hdr.dst_addr;
+    let old_src_ip = ipv4_hdr.src_addr;
+    let old_csum_ip = ipv4_hdr.check;
+
+    ipv4_hdr.src_addr = old_dst_ip;
+    ipv4_hdr.dst_addr = ip_dest;
+
+    ipv4_hdr.check = update(old_csum_ip, &old_src_ip, &ip_dest);
+
+    let tcp_hdr_offset = if ipv4_hdr.ihl() == 5 {
+        EthHdr::LEN + MIN_IPV4_HEADER_LEN
+    } else {
+        EthHdr::LEN + (ipv4_hdr.ihl() as usize) * 4
+    };
+
+    let tcp_hdr = unsafe { &mut *(frame_data.as_mut_ptr().add(tcp_hdr_offset) as *mut TcpHdr) };
+
+    let old_dst_port = tcp_hdr.dest;
+    let old_source_port = tcp_hdr.source;
+    let mut old_csum_tcp_bytes = tcp_hdr.check.to_be_bytes();
+
+    tcp_hdr.source = old_dst_port;
+    tcp_hdr.dest = port_dest.to_be();
+
+    old_csum_tcp_bytes = update(
+        old_csum_tcp_bytes,
+        &old_source_port.to_be_bytes(),
+        &port_dest.to_be_bytes(),
+    );
+
+    old_csum_tcp_bytes = update(old_csum_tcp_bytes, &old_src_ip, &ip_dest);
+
+    // I'm using here from_ne_bytes because update function expects values in native endianess.
+    tcp_hdr.check = u16::from_ne_bytes(old_csum_tcp_bytes);
+
+    true
+}

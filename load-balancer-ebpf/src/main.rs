@@ -7,7 +7,6 @@ use aya_ebpf::{
     maps::{xdp::XskMap, HashMap},
     programs::XdpContext,
 };
-use aya_log_ebpf::info;
 use core::mem;
 use network_types::{
     eth::{EthHdr, EtherType},
@@ -43,11 +42,12 @@ fn try_load_balancer(ctx: XdpContext) -> Result<u32, ()> {
 
     match unsafe { (*ipv4hdr).proto } {
         IpProto::Tcp => {
+            let ipv4hdr_len = unsafe { (*ipv4hdr).ihl() as usize } * 4;
             // let tcphdr: *const TcpHdr = ptr_at(&ctx, EthHdr::LEN + Ipv4Hdr::LEN)?;
-            let tcphdr: *const TcpHdr = ptr_at(&ctx, EthHdr::LEN + Ipv4Hdr::LEN)?;
-            let port = unsafe { (*tcphdr).source.to_be() };
+            let tcphdr: *const TcpHdr = ptr_at(&ctx, EthHdr::LEN + ipv4hdr_len)?;
+            let port = unsafe { u16::from_be((*tcphdr).source) };
+
             if port == 1299 {
-                // info!(&ctx, "TCP PACKET RECEIVED");
                 let queue_id = unsafe { (*ctx.ctx).rx_queue_index };
                 let code_value = XSK_SOCKS
                     .redirect(queue_id, 0)

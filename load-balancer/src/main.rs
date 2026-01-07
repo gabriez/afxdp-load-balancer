@@ -11,7 +11,10 @@ use {
         programs::{Xdp, XdpFlags},
     },
     clap::Parser,
-    load_balancer::process::{FramesManager, FRAME_COUNT},
+    load_balancer::{
+        process::{FramesManager, FRAME_COUNT},
+        tcp_connections_handler::{route_packet, shift_mac},
+    },
     log::{debug, warn},
     std::{
         os::fd::AsFd,
@@ -23,6 +26,7 @@ use {
 
 const FRAME_SIZE: usize = 4096;
 const RING_SIZE: usize = 4096;
+const PACKETS_BATCH: usize = 64;
 
 #[derive(Debug, Parser)]
 struct Opt {
@@ -161,17 +165,35 @@ fn build_thread_tx_loop(
 
             let available_packets = rx_ring.available();
             if available_packets > 0 {
-                while let Some(packet) = rx_ring.read() {
+                let mut batch_size = PACKETS_BATCH.min(available_packets);
+                while let Some(packet) = rx_ring.read()
+                    && batch_size > 0
+                {
+                    batch_size -= 1;
                     let slice_frame = SliceUmemFrame::from(packet);
 
                     let available_tx = tx_ring.available();
 
                     // If by any reason tx_ring does not have any available frame, we're gonna kick it to try to free some space
+                    // TODO: maybe I should add a retry here to avoid dropping packets in high load scenarios with a limit clearly to avoid
+                    // endless loops
                     if available_tx == 0 {
                         tx_ring.commit();
                         kick(&tx_ring);
                         tx_ring.sync(false);
                     }
+
+                    let frame_data = umem.map_frame_mut(&slice_frame);
+
+                    let routed = route_packet(frame_data, [127, 0, 0, 1], 8000);
+
+                    // Most of the time, packets will be routed, so maybe we can use likely here in the future to optimize branch prediction
+                    if !routed {
+                        umem.release(frame_ret.offset());
+                        continue;
+                    }
+
+                    shift_mac(frame_data);
 
                     match tx_ring.write(slice_frame, 0) {
                         Ok(_) => {
@@ -214,6 +236,7 @@ fn build_thread_tx_loop(
                 }
                 fill_ring.sync(false);
             }
+            std::thread::sleep(std::time::Duration::from_millis(2000));
         }
     };
     let thread_handle = spawn(task);
