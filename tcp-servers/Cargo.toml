@@ -1,0 +1,11 @@
+[package]
+name = "tcp-servers"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+
+
+[[bin]]
+name = "tcp-servers"
+path = "src/main.rs"

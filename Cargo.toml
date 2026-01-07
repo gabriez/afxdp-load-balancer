@@ -1,8 +1,8 @@
 [workspace]
 resolver = "2"
 authors=["Gabriel Torres"]
-members = ["load-balancer", "load-balancer-common", "load-balancer-ebpf", "agave-afxdp"]
-default-members = ["load-balancer", "load-balancer-common", "agave-afxdp"]
+members = ["load-balancer", "load-balancer-common", "load-balancer-ebpf", "agave-afxdp", "tcp-servers"]
+default-members = ["load-balancer", "load-balancer-common", "agave-afxdp", "tcp-servers"]
 
 [workspace.dependencies]
 aya = { version = "0.13.1", default-features = false }
@@ -24,7 +24,10 @@ log = { version = "0.4.22", default-features = false }
 tokio = { version = "1.40.0", default-features = false }
 thiserror = "2.0.16"
 which = { version = "6.0.0", default-features = false }
+network-types = { version = "0.0.8", default-features = false}
+
 
 [profile.release.package.load-balancer-ebpf]
 debug = 2
 codegen-units = 1
+
