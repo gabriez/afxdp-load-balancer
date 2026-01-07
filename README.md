@@ -2,6 +2,9 @@
 This a personal project to grasp a better understanding of TCP connections using AF_XDP. The last time I made a program using AF_XDP was about multicloning and redirecting UDP packets. This time I want the load balancer to include the following: 
 - Stop syn flood
 - Stop connections using a blocklist (surely I will block the IP's from the kernel space).
+- Implement a backend that controls remotely the blocklist and also fetch statistics using Prometheus.
+- Implement Prometheus.
+- Implement NAT Table to control connections.
 - Send the TCP packets to different backends and handle the connections from the AF_XDP program deleting from the list of open connections those that are going to close.
 - Filter ports that are not going to port 80 or 443.
 
