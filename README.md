@@ -28,7 +28,7 @@ I'm open to receive any feedback.
 Use `cargo build`, `cargo check`, etc. as normal. Run your program with:
 
 ```shell
-cargo run --release --config 'target."cfg(all())".runner="sudo -E"'
+cargo run --release --bin load-balancer --config 'target."cfg(all())".runner="sudo -E"'
 ```
 
 Cargo build scripts are used to automatically build the eBPF correctly and include it in the
@@ -45,3 +45,26 @@ CC=${ARCH}-linux-musl-gcc cargo build --package load-balancer --release \
 ```
 The cross-compiled program `target/${ARCH}-unknown-linux-musl/release/load-balancer` can be
 copied to a Linux server or VM and run there.
+
+## Arguments to run the load balancer
+Right now, the load balancer only has three arguments: 
+- queues: Amount of queues to create sockets for [default: 1]. For every RX queue you create a socket.
+
+  Use example: 
+```shell
+  cargo run --release --bin load-balancer --config 'target."cfg(all())".runner="sudo -E"' -- --iface or -i <interface>  
+```
+- iface: Network interface to attach the XDP program to [default: lo].
+
+  Use example: 
+ 
+```shell
+cargo run --release --bin load-balancer --config 'target."cfg(all())".runner="sudo -E"' -- --queues or -q <amount>
+```
+- help: Argument that comes with clap.
+
+  Use example: 
+```shell
+cargo run --release --bin load-balancer --config 'target."cfg(all())".runner="sudo -E"' -- --help
+```
+

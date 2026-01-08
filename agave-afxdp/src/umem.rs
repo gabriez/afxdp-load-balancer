@@ -53,7 +53,7 @@ impl From<XdpDesc> for SliceUmemFrame<'_> {
     fn from(desc: XdpDesc) -> Self {
         Self {
             offset: desc.addr() as usize,
-            len: desc.len() as usize,
+            len: desc.len(),
             _buf: PhantomData,
         }
     }

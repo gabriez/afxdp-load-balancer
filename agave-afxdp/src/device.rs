@@ -340,6 +340,10 @@ impl XdpDesc {
         self.len as usize
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
     pub fn addr(&self) -> u64 {
         self.addr
     }

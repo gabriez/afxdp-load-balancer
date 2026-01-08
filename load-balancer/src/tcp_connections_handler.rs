@@ -1,11 +1,6 @@
 use {
-    // internet_checksum::update,
     internet_checksum::update,
-    network_types::{
-        eth::EthHdr,
-        ip::Ipv4Hdr,
-        tcp::{self, TcpHdr},
-    },
+    network_types::{eth::EthHdr, ip::Ipv4Hdr, tcp::TcpHdr},
     std::{
         collections::HashMap,
         fmt,
