@@ -1,14 +1,13 @@
-use {
-    crate::tcp_connections_handler::{route_packet, shift_mac},
-    agave_afxdp::{
-        device::{RxFillRing, TxCompletionRing},
-        socket::{RingFull, TxRing},
-        tx_loop::kick,
-        umem::{Frame, SliceUmem, SliceUmemFrame, Umem},
-    },
-    log::warn,
-    thiserror::Error,
+use agave_afxdp::{
+    device::{RxFillRing, TxCompletionRing},
+    socket::{RingFull, TxRing},
+    tx_loop::kick,
+    umem::{Frame, SliceUmem, SliceUmemFrame, Umem},
 };
+use log::warn;
+use thiserror::Error;
+
+use crate::tcp_connections_handler::{route_packet, shift_mac};
 
 pub const FRAME_COUNT: usize = 4096;
 pub const PACKETS_BATCH: usize = 64;
@@ -209,6 +208,7 @@ pub fn recycle_frames<'a>(
     frames_manager: &mut FramesManager<'a>,
 ) -> anyhow::Result<()> {
     let available_frames = umem.available();
+    fill_ring.sync(false);
 
     if available_frames > 0 {
         if let Err(err) = frames_manager.insert_frames_from_umem(umem) {

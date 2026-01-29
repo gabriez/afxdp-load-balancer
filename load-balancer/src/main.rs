@@ -1,27 +1,26 @@
-use {
-    agave_afxdp::{
-        device::{DeviceQueue, NetworkDevice, QueueId, RingSizes},
-        socket::Socket,
-        umem::{PageAlignedMemory, SliceUmem},
-    },
-    anyhow::Context as _,
-    aya::{
-        maps::{xdp::XskMap, MapData},
-        programs::{Xdp, XdpFlags},
-    },
-    clap::Parser,
-    load_balancer::process::{
-        free_tx_frames, insert_frames_fill_ring, process_packets, receive_packets, recycle_frames,
-        release_cq_frames, send_packets, FramesManager, FRAME_COUNT, PACKETS_BATCH,
-    },
-    log::{debug, warn},
-    std::{
-        os::fd::AsFd,
-        sync::{Arc, RwLock},
-        thread::spawn,
-    },
-    tokio::signal,
+use std::{
+    os::fd::AsFd,
+    sync::{Arc, RwLock},
+    thread::spawn,
 };
+
+use agave_afxdp::{
+    device::{DeviceQueue, NetworkDevice, QueueId, RingSizes},
+    socket::Socket,
+    umem::{PageAlignedMemory, SliceUmem},
+};
+use anyhow::Context as _;
+use aya::{
+    maps::{xdp::XskMap, MapData},
+    programs::{Xdp, XdpFlags},
+};
+use clap::Parser;
+use load_balancer::process::{
+    free_tx_frames, insert_frames_fill_ring, process_packets, receive_packets, recycle_frames,
+    release_cq_frames, send_packets, FramesManager, FRAME_COUNT, PACKETS_BATCH,
+};
+use log::{debug, warn};
+use tokio::signal;
 
 const FRAME_SIZE: usize = 4096;
 const RING_SIZE: usize = 4096;
