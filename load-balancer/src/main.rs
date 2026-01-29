@@ -82,8 +82,6 @@ async fn run_af_xdp_socket() -> anyhow::Result<()> {
     } else {
         anyhow::bail!("failed to find XSK map");
     };
-    // Mover aligned_memory fuera del alcance inmediato
-    // TODO: implement loop for multiple threads related to multiple queues
 
     let mut joinset = Vec::new();
 
@@ -153,13 +151,6 @@ fn build_thread_tx_loop(
         let mut rx_ring = rx.ring.unwrap();
         let mut tx_ring = tx.ring.unwrap();
         rx_ring.sync(false);
-
-        // TODO: maybe i should move this operations into a separate async task to be able to handle ctrl-c properly and exit the program
-        // Also i should implement a way to refill the fill ring when frames are consumed
-        // And for the end, I must check if it's better to use parallel programming or not to improve performance.
-        // Which libraries would be better for that purpose?
-        // Tokio seems to be a good option, but maybe there are others more suitable for high-performance networking applications.
-        // Rayon to work with parallel iterators?
 
         loop {
             rx_ring.sync(false);
