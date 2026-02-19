@@ -1,13 +1,15 @@
 #![no_std]
 #![no_main]
 
+use core::mem;
+
 use aya_ebpf::{
     bindings::xdp_action,
     macros::{map, xdp},
-    maps::{xdp::XskMap, HashMap},
+    maps::{xdp::XskMap, Array, HashMap},
     programs::XdpContext,
 };
-use core::mem;
+use load_balancer_common::{MAX_BLOCKLIST_ENTRIES, MIN_IPV4_HEADER_LEN};
 use network_types::{
     eth::{EthHdr, EtherType},
     ip::{IpProto, Ipv4Hdr},
@@ -18,8 +20,14 @@ use network_types::{
 #[map(name = "XSK_SOCKS")]
 static XSK_SOCKS: XskMap = XskMap::with_max_entries(12, 0);
 
-#[map(name = "FILTER_PORTS")]
-static FILTER_PORTS: HashMap<u16, u8> = HashMap::with_max_entries(1024, 0);
+// We are using a hashmap to store the blocklist of IP addresses. The key is the source IP address and the value is a
+// boolean indicating whether to drop the packet or not. I decided to use this instead of an array because we can easily add and remove IP addresses from the blocklist
+// without having to worry about the size of the array. The value is a u64 that counts the number of times the IP address has been blocked,
+// which can be useful for monitoring and debugging purposes.
+#[map(name = "BLOCKLIST")]
+static BLOCKLIST: HashMap<[u8; 4], u64> = HashMap::with_max_entries(MAX_BLOCKLIST_ENTRIES, 0);
+
+// TODO: study the implementation of a bloom filter for blocking IP addresses in the future.
 
 #[xdp]
 pub fn load_balancer(ctx: XdpContext) -> u32 {
@@ -38,12 +46,24 @@ fn try_load_balancer(ctx: XdpContext) -> Result<u32, ()> {
     }
 
     let ipv4hdr: *const Ipv4Hdr = ptr_at(&ctx, EthHdr::LEN)?;
-    // let source_addr = u32::from_be_bytes(unsafe { (*ipv4hdr).src_addr });
+
+    // Check if the source IP address is in the blocklist. If it is, drop the packet.
+    if let Some(blocked) = unsafe { BLOCKLIST.get_ptr_mut(&(*ipv4hdr).src_addr) } {
+        blocked.wrapping_add(1);
+
+        return Ok(xdp_action::XDP_DROP);
+    }
 
     match unsafe { (*ipv4hdr).proto } {
         IpProto::Tcp => {
-            let ipv4hdr_len = unsafe { (*ipv4hdr).ihl() as usize } * 4;
-            // let tcphdr: *const TcpHdr = ptr_at(&ctx, EthHdr::LEN + Ipv4Hdr::LEN)?;
+            let ipv4_ihl = unsafe { (*ipv4hdr).ihl() };
+
+            let ipv4hdr_len: usize = if ipv4_ihl == 5 {
+                EthHdr::LEN + MIN_IPV4_HEADER_LEN
+            } else {
+                EthHdr::LEN + (ipv4_ihl as usize) * 4
+            };
+
             let tcphdr: *const TcpHdr = ptr_at(&ctx, EthHdr::LEN + ipv4hdr_len)?;
             let port = unsafe { u16::from_be((*tcphdr).source) };
 

@@ -128,7 +128,7 @@ pub fn process_packets<'a>(
         if let Some(frame) = packet.take() {
             let frame_data = umem.map_frame_mut(&frame);
 
-            if route_packet(frame_data, [127, 0, 0, 1], 8000) {
+            if route_packet(frame_data, [192, 168, 0, 241], 8000) {
                 shift_mac(frame_data);
                 routed[index] = Some(frame);
             } else {

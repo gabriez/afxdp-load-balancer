@@ -1,13 +1,13 @@
-use {
-    internet_checksum::update,
-    network_types::{eth::EthHdr, ip::Ipv4Hdr, tcp::TcpHdr},
-    std::{
-        collections::HashMap,
-        fmt,
-        sync::{Arc, RwLock},
-    },
-    tokio::task::JoinHandle,
+use std::{
+    collections::HashMap,
+    fmt,
+    sync::{Arc, RwLock},
 };
+
+use internet_checksum::update;
+use load_balancer_common::MIN_IPV4_HEADER_LEN;
+use network_types::{eth::EthHdr, ip::Ipv4Hdr, tcp::TcpHdr};
+use tokio::task::JoinHandle;
 
 const MIN_PORT: u16 = 32768;
 const MAX_PORT: u16 = 60999;
@@ -243,8 +243,6 @@ pub fn shift_mac(frame_data: &mut [u8]) {
 
 #[inline(always)]
 pub fn route_packet(frame_data: &mut [u8], ip_dest: [u8; 4], port_dest: u16) -> bool {
-    const MIN_IPV4_HEADER_LEN: usize = 20;
-
     let eth_hdr = unsafe { std::ptr::read_unaligned(frame_data.as_ptr() as *const EthHdr) };
     let ether_type = eth_hdr.ether_type;
 

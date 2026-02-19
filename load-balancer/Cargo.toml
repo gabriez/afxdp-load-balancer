@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 load-balancer-common = { path = "../load-balancer-common", features = ["user"] }
-agave-afxdp = {path = '../agave-afxdp' }
+agave-afxdp = {git = 'https://github.com/gabriez/agave.git', package = "agave-xdp", branch ="read-rx-ring"}
 
 anyhow = { workspace = true, default-features = true }
 aya = { workspace = true }
