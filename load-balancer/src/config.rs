@@ -14,7 +14,9 @@ use tokio::fs::read_to_string;
 pub struct Config {
     pub rx_ports: Vec<u16>,
     pub backends_addresses: Vec<SocketAddr>,
-    pub nat_ports_range: (u16, u16),
+    // We could provide a default value in nat_ports_range is not present in the config file
+    pub nat_ports_range: Option<(u16, u16)>,
+    pub blocklist: Vec<[u8; 4]>,
 }
 
 impl Config {

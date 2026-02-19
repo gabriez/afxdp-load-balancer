@@ -30,6 +30,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "agave-xdp"
+version = "3.1.0"
+source = "git+https://github.com/gabriez/agave.git?branch=read-rx-ring#5fe003dc3bba8b00939dbeaf4e5768aed61a16f2"
+dependencies = [
+ "aya",
+ "caps",
+ "crossbeam-channel",
+ "libc",
+ "log",
+ "thiserror 2.0.16",
+]
+
+[[package]]
 name = "allocator-api2"
 version = "0.2.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -450,9 +463,9 @@ checksum = "4a5f13b858c8d314ee3e8f639011f7ccefe71f97f96e50151fb991f267928e2c"
 
 [[package]]
 name = "libc"
-version = "0.2.174"
+version = "0.2.182"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1171693293099992e19cddea4e8b849964e9846f4acee11b3948bcc337be8776"
+checksum = "6800badb6cb2082ffd7b6a67e6125bb39f18782f793520caee8cb8846be06112"
 
 [[package]]
 name = "linux-raw-sys"
@@ -464,7 +477,7 @@ checksum = "d26c52dbd32dccf2d10cac7725f8eae5296885fb5703b261f7d0a0739ec807ab"
 name = "load-balancer"
 version = "0.1.0"
 dependencies = [
- "agave-afxdp",
+ "agave-xdp",
  "anyhow",
  "aya",
  "aya-build",
@@ -503,9 +516,9 @@ dependencies = [
 
 [[package]]
 name = "log"
-version = "0.4.27"
+version = "0.4.29"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "13dc2df351e3202783a1fe0d44375f7295ffb4049267b0f3018346dc122a1d94"
+checksum = "5e5032e24019045c762d3c0f28f5b6b8bbf38563a65908389bf7978758920897"
 
 [[package]]
 name = "memchr"

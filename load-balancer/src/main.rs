@@ -11,14 +11,18 @@ use agave_afxdp::{
 };
 use anyhow::Context as _;
 use aya::{
-    maps::{xdp::XskMap, MapData},
+    maps::{xdp::XskMap, HashMap, MapData, MapError},
     programs::{Xdp, XdpFlags},
 };
 use clap::Parser;
-use load_balancer::process::{
-    free_tx_frames, insert_frames_fill_ring, process_packets, receive_packets, recycle_frames,
-    release_cq_frames, send_packets, FramesManager, FRAME_COUNT, PACKETS_BATCH,
+use load_balancer::{
+    config::Config,
+    process::{
+        free_tx_frames, insert_frames_fill_ring, process_packets, receive_packets, recycle_frames,
+        release_cq_frames, send_packets, FramesManager, FRAME_COUNT, PACKETS_BATCH,
+    },
 };
+use load_balancer_common::MAX_BLOCKLIST_ENTRIES;
 use log::{debug, warn};
 use tokio::signal;
 
@@ -34,6 +38,10 @@ struct Opt {
     /// Amount of queues to create sockets for
     #[clap(short, long, default_value_t = 1)]
     queues: u64,
+
+    /// Path to the configuration file
+    #[clap(short, long, default_value = "config.json")]
+    config_path: String,
 }
 
 #[tokio::main]
@@ -51,7 +59,13 @@ async fn main() -> anyhow::Result<()> {
 
 async fn run_af_xdp_socket() -> anyhow::Result<()> {
     let opt: Opt = Opt::parse();
+    let Opt {
+        iface,
+        queues,
+        config_path,
+    } = opt;
 
+    let config = Config::from_file(&config_path).await?;
     env_logger::init();
 
     let rlim = libc::rlimit {
@@ -70,7 +84,6 @@ async fn run_af_xdp_socket() -> anyhow::Result<()> {
     if let Err(e) = aya_log::EbpfLogger::init(&mut ebpf) {
         warn!("failed to initialize eBPF logger: {}", e);
     }
-    let Opt { iface, queues } = opt;
 
     let program: &mut Xdp = ebpf.program_mut("load_balancer").unwrap().try_into()?;
     program.load()?;
@@ -82,6 +95,32 @@ async fn run_af_xdp_socket() -> anyhow::Result<()> {
     } else {
         anyhow::bail!("failed to find XSK map");
     };
+
+    // Only accept 1024 entries in the blocklist, which should be enough for this PoC
+    let mut blocklist_map: HashMap<_, [u8; 4], u64> = if let Some(map) = ebpf.take_map("BLOCKLIST")
+    {
+        map.try_into()?
+    } else {
+        anyhow::bail!("failed to find blocklist map");
+    };
+
+    for (i, ip) in config.blocklist.iter().enumerate() {
+        if i >= MAX_BLOCKLIST_ENTRIES as usize {
+            break;
+        }
+        match blocklist_map.insert(ip, 0, 0) {
+            Err(MapError::OutOfBounds {
+                index: _,
+                max_entries,
+            }) => {
+                log::warn!("Blocklist too big for actual capacity. Max capacity {}. \n IP addresses took until IP: {:?}", max_entries, ip );
+            }
+            Err(err) => {
+                anyhow::bail!("Blocklist map err: {:?}", err);
+            }
+            Ok(_) => {}
+        }
+    }
 
     let mut joinset = Vec::new();
 
