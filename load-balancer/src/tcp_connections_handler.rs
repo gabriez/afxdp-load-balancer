@@ -83,6 +83,9 @@ impl fmt::Display for TcpState {
     }
 }
 
+/// PortsPool structure to manage the pool of available ports for NAT entries. It keeps track of the maximum number of ports and the number of ports currently available.
+/// It provides methods to get a port from the pool and release a port back to the pool.
+#[derive(Debug)]
 pub struct PortsPool {
     max_ports: usize,
     ports_available: usize,
@@ -123,6 +126,7 @@ impl PortsPool {
     }
 }
 
+/// NatEntry structure to represent a NAT entry in the NAT table. It contains the client IP and port, the destination IP and port, the last seen timestamp, and the state of the TCP connection.
 #[derive(Hash, Eq, PartialEq)]
 pub struct NatEntry {
     // These addresses are the origin addresses from which the connection starts
@@ -136,16 +140,31 @@ pub struct NatEntry {
     state: TcpState,
 }
 
+/// ClientKey structure to represent a key for the client map in the NAT table. It contains the client IP and port. This structure is used to quickly look up the NAT entry for a given client.
 #[derive(Hash, Eq, PartialEq)]
 pub struct ClientKey {
     client_ip: [u8; 4],
     client_port: u16,
 }
 
+impl ClientKey {
+    pub fn new(client_ip: [u8; 4], client_port: u16) -> Self {
+        Self {
+            client_ip,
+            client_port,
+        }
+    }
+}
+
 /// NAT Table structure to hold active NAT entries and mappings
 pub struct NatTable {
+    /// Maps the proxy port to the corresponding NAT entry. This allows for quick lookups of NAT entries based on the proxy port used in the TCP connection.
     nat_map: HashMap<u16, NatEntry>,
+
+    /// Used to quickly look up the NAT entry for a given client IP and port. It maps the client key (IP and port) to the proxy port used in the NAT entry.
     client_map: HashMap<ClientKey, u16>,
+
+    /// Manages the pool of available ports for NAT entries. It keeps track of the maximum number of ports and the number of ports currently available, and provides methods to get a port from the pool and release a port back to the pool.
     ports_pool: PortsPool,
 }
 
@@ -167,6 +186,7 @@ impl NatTable {
 
     pub fn open_connection(&mut self) {
         // Implementation for opening a new connection and creating NAT entries
+
         todo!()
     }
 
