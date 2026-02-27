@@ -9,6 +9,28 @@ use load_balancer_common::MIN_IPV4_HEADER_LEN;
 use network_types::{eth::EthHdr, ip::Ipv4Hdr, tcp::TcpHdr};
 use tokio::task::JoinHandle;
 
+/*
+NatTable should not modify packets structure, we only want this structure to handle connections and manage the state of the TCP connection.
+fn route_packet and fn shift_mac will be responsible for modifying the packets and redirecting them to the correct backend server according to the NAT entries in the NatTable.
+
+TODO: Should I implement a logic with a frontend and a backend?
+
+The frontend will be doing the following:
+- Return IP and port to which the client should connect to. This will be used by the XDP program to redirect the traffic to the correct backend server.
+- Return the origin proxy port from where we are starting the connection.
+- Receive the TCP flags from the XDP program to manage the state of the TCP connection.
+
+
+The backend will be doing the following:
+- Create async tasks to manage the TCP connections. This way I can also implement timeouts for connections in different states.
+- Check the state of the TCP connection and update it according to the TCP flags received from the XDP program.
+- Close the connection and clean up the NAT entries when the connection is closed by the client, the backend server or doesn't change for too long.
+- We don't want NatEntries to be public because we want to manage them only inside the backend, so we can ensure that the state of the TCP connection is updated correctly.
+
+Questions:
+- Should frontend handle PortsPool?
+*/
+
 const MIN_PORT: u16 = 32768;
 const MAX_PORT: u16 = 60999;
 
@@ -136,8 +158,11 @@ pub struct NatEntry {
     // This addresses are the destination addresses to which the proxy port maps
     destination_port: u16,
     destination_ip: [u8; 4],
-    last_seen: u64,
-    state: TcpState,
+
+    // TCP connection management fields
+    last_seen: std::time::Instant, // Timestamp of the last packet seen for this connection, used for timeouts and cleanup
+    last_tcp_flag: TcpFlags, // The last TCP flag received for this connection, used to manage the state of the TCP connection
+    state: TcpState, // The current state of the TCP connection, used to manage the connection lifecycle
 }
 
 /// ClientKey structure to represent a key for the client map in the NAT table. It contains the client IP and port. This structure is used to quickly look up the NAT entry for a given client.
@@ -179,13 +204,49 @@ impl NatTable {
         }
     }
 
-    pub fn close_connection(&mut self) {
+    pub fn close_connection(&mut self, client_key: ClientKey) -> Result<(), NatTableError> {
         // Implementation for closing a connection and cleaning up NAT entries
-        todo!()
+        if self.connection_exists(key) {
+            if let Some(port) = self.client_map.remove(&client_key) {
+                self.nat_map.remove(&port);
+                self.ports_pool.release_port(port);
+            }
+        } else {
+            return Err(NatTableError::ConnectionNotFound);
+        }
+        Ok(())
     }
 
-    pub fn open_connection(&mut self) {
+    // TODO: probably i'll return here an async task to manage the connection and update the state of the TCP connection according to the TCP flags received in the packets.
+    // This way I can also implement timeouts for connections in different states.
+    pub fn open_connection(
+        &mut self,
+        client_port: u16,
+        client_ip: [u8; 4],
+        destination_port: u16,
+        destination_ip: [u8; 4],
+    ) -> Result<(), NatTableError> {
         // Implementation for opening a new connection and creating NAT entries
+
+        let proxy_port = match self.ports_pool.get_port() {
+            Some(port) => port,
+            None => {
+                // No available ports in the pool, handle this case as needed (e.g., return an error)
+                return Err(NatTableError::NoAvailablePorts);
+            }
+        };
+
+        let _nat_entry = NatEntry {
+            client_port,
+            client_ip,
+            destination_port,
+            destination_ip,
+            last_seen: std::time::Instant::now(),
+            last_tcp_flag: TcpFlags::SYN, // Placeholder, the first packet should have the SYN flag set
+            state: TcpState::SynReceived, // Placeholder i have to read TCP docs
+        };
+
+        let client_key = ClientKey::new(client_ip, client_port);
 
         todo!()
     }
@@ -194,11 +255,7 @@ impl NatTable {
         self.nat_map.get(&port)
     }
 
-    pub fn connection_exists(&self, client_ip: [u8; 4], client_port: u16) -> bool {
-        let key = ClientKey {
-            client_ip,
-            client_port,
-        };
+    pub fn connection_exists(&self, key: ClientKey) -> bool {
         self.client_map.contains_key(&key)
     }
 
@@ -206,11 +263,7 @@ impl NatTable {
         self.nat_map.len()
     }
 
-    pub fn get_connection_port(&self, client_ip: [u8; 4], client_port: u16) -> Option<u16> {
-        let key = ClientKey {
-            client_ip,
-            client_port,
-        };
+    pub fn get_connection_port(&self, key: ClientKey) -> Option<u16> {
         self.client_map.get(&key).cloned()
     }
 }
@@ -221,6 +274,17 @@ impl Default for NatTable {
     }
 }
 
+#[thiserror::Error]
+enum NatTableError {
+    #[error("No available ports in the pool")]
+    NoAvailablePorts,
+    #[error("NAT entry not found for the given port")]
+    NatEntryNotFound,
+    #[error("NAT entry already exists for the given client")]
+    NatEntryAlreadyExists,
+    #[error("Connection does not exists")]
+    ConnectionNotFound,
+}
 pub struct ConnectionsManager {
     nat_table: SharedNatTable,
 }
@@ -236,6 +300,10 @@ impl ConnectionsManager {
 
     pub fn check_connections(&self) -> JoinHandle<()> {
         // Implementation for checking and managing connections
+        // TODO: I think I should check every connection separetaly
+        // and update the state of the TCP connection according to the TCP flags received in the packets.
+        // This way I can also implement timeouts for connections in different states.
+        // I will use this function to clean up tasks that already finished or handle errors
         tokio::task::spawn(async move {
             // Connection checking logic goes here
         })
@@ -246,7 +314,9 @@ impl ConnectionsManager {
 // I can use this guide: https://www.rfc-editor.org/rfc/rfc793.html and this one too https://medium.com/@itherohit/tcp-connection-establishment-an-in-depth-exploration-46031ef69908
 // Also, I could check how other load balancers do it, like HAProxy and NGINX.
 
-// These are temporary methods, I will refactor them later to use them inside the NAT table and connection manager structures.
+/// Shift the source and destination MAC addresses in the Ethernet header of the packet. This is necessary to redirect the packet,
+/// if we don't, the kernel will drop the packet because it will think that the packet is coming from internet and not going back to it.
+#[inline(always)]
 pub fn shift_mac(frame_data: &mut [u8]) {
     let eth_hdr = unsafe { &mut *(frame_data.as_mut_ptr() as *mut EthHdr) };
     let src_mac = eth_hdr.src_addr;
@@ -258,9 +328,7 @@ pub fn shift_mac(frame_data: &mut [u8]) {
 
 // To implement checksum update I'm using internet-checksum. This crate is optimized to calculate checksums efficiently and take advantage of CPU.
 // You can check the code on the following link https://docs.rs/internet-checksum/0.2.1/src/internet_checksum/lib.rs.html
-
-// TODO: implement this method inside NAT Table to route packets according to NAT entries
-
+/// Route the packet by modifying the destination IP address and port in the IPv4 and TCP headers, respectively. It also updates the checksums accordingly.
 #[inline(always)]
 pub fn route_packet(frame_data: &mut [u8], ip_dest: [u8; 4], port_dest: u16) -> bool {
     let eth_hdr = unsafe { std::ptr::read_unaligned(frame_data.as_ptr() as *const EthHdr) };
