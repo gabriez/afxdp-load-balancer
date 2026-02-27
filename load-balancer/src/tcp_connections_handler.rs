@@ -65,6 +65,66 @@ pub mod TcpFlags {
     pub const FIN: u8 = 0b00000001;
 }
 
+pub enum TcpFlagsEnum {
+    CWR,
+    ECE,
+    URG,
+    ACK,
+    PSH,
+    RST,
+    SYN,
+    FIN,
+}
+
+impl TcpFlagsEnum {
+    pub fn from_u8(flag: u8) -> Result<Self, TcpFlagsError> {
+        match flag {
+            TcpFlags::CWR => Ok(TcpFlagsEnum::CWR),
+            TcpFlags::ECE => Ok(TcpFlagsEnum::ECE),
+            TcpFlags::URG => Ok(TcpFlagsEnum::URG),
+            TcpFlags::ACK => Ok(TcpFlagsEnum::ACK),
+            TcpFlags::PSH => Ok(TcpFlagsEnum::PSH),
+            TcpFlags::RST => Ok(TcpFlagsEnum::RST),
+            TcpFlags::SYN => Ok(TcpFlagsEnum::SYN),
+            TcpFlags::FIN => Ok(TcpFlagsEnum::FIN),
+            _ => Err(TcpFlagsError::InvalidFlagValue(flag)),
+        }
+    }
+
+    pub fn from_raw_data(frame_data: &[u8]) -> Result<Self, TcpFlagsError> {
+        let eth_hdr = unsafe { std::ptr::read_unaligned(frame_data.as_ptr() as *const EthHdr) };
+        let ether_type = eth_hdr.ether_type;
+
+        if ether_type != network_types::eth::EtherType::Ipv4 {
+            return Err(TcpFlagsError::InvalidFlagValue(0));
+        }
+
+        let ipv4_hdr = unsafe { &*(frame_data.as_ptr().add(EthHdr::LEN) as *const Ipv4Hdr) };
+
+        if ipv4_hdr.proto != network_types::ip::IpProto::Tcp {
+            return Err(TcpFlagsError::InvalidFlagValue(0));
+        }
+
+        let tcp_hdr_offset = if ipv4_hdr.ihl() == 5 {
+            EthHdr::LEN + MIN_IPV4_HEADER_LEN
+        } else {
+            EthHdr::LEN + (ipv4_hdr.ihl() as usize) * 4
+        };
+
+        let tcp_hdr = unsafe { &*(frame_data.as_ptr().add(tcp_hdr_offset) as *const TcpHdr) };
+
+        let flags_byte = tcp_hdr._bitfield_1.get(0usize, 4u8) as u8;
+
+        TcpFlagsEnum::from_u8(flags_byte)
+    }
+}
+
+#[thiserror::error]
+pub enum TcpFlagsError {
+    #[error("Invalid TCP flag value: {0}")]
+    InvalidFlagValue(u8),
+}
+
 /// State of TCP connection.
 #[derive(Copy, Clone, Debug, Hash, Eq, PartialEq)]
 pub enum TcpState {

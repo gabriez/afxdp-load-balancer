@@ -6,7 +6,7 @@ use core::mem;
 use aya_ebpf::{
     bindings::xdp_action,
     macros::{map, xdp},
-    maps::{xdp::XskMap, Array, HashMap},
+    maps::{xdp::XskMap, HashMap},
     programs::XdpContext,
 };
 use load_balancer_common::{MAX_BLOCKLIST_ENTRIES, MIN_IPV4_HEADER_LEN};
