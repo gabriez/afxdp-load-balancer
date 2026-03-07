@@ -7,7 +7,7 @@ use agave_afxdp::{
 use log::warn;
 use thiserror::Error;
 
-use crate::tcp_connections_handler::{route_packet, shift_mac};
+use crate::tcp_connections_handler::{get_mut_headers, route_packet, shift_mac};
 
 pub const FRAME_COUNT: usize = 4096;
 pub const PACKETS_BATCH: usize = 64;
@@ -119,6 +119,7 @@ pub fn receive_packets<'a>(
 
 #[inline(always)]
 pub fn process_packets<'a>(
+    // address_provider: &impl AddressProvider,
     mut received: PacketsBatch<'a>,
     umem: &mut SliceUmem<'a>,
 ) -> PacketsBatch<'a> {
@@ -128,11 +129,15 @@ pub fn process_packets<'a>(
         if let Some(frame) = packet.take() {
             let frame_data = umem.map_frame_mut(&frame);
 
-            if route_packet(frame_data, [192, 168, 0, 241], 8000) {
-                shift_mac(frame_data);
+            if let Some((eth_hdr, ipv4_hdr, tcp_hdr)) = get_mut_headers(frame_data) {
+                // let backend_address = address_provider.get_backend_for_client(ipv4_hdr.source(), tcp_hdr.source_port());
+
+                shift_mac(eth_hdr);
+                route_packet(ipv4_hdr, tcp_hdr, [192, 168, 0, 241], 8000);
                 routed[index] = Some(frame);
             } else {
                 // TODO: Implement statistic for packets dropped and bytes dropped
+
                 umem.release(frame.offset());
             }
         } else {

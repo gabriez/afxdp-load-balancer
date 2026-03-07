@@ -19,7 +19,7 @@ The frontend will be doing the following:
 - Return IP and port to which the client should connect to. This will be used by the XDP program to redirect the traffic to the correct backend server.
 - Return the origin proxy port from where we are starting the connection.
 - Receive the TCP flags from the XDP program to manage the state of the TCP connection.
-
+- The frontend will be build when we create the backend. If by any means the frontend disappears, then we have to drop the backend and connections.
 
 The backend will be doing the following:
 - Create async tasks to manage the TCP connections. This way I can also implement timeouts for connections in different states.
@@ -347,18 +347,18 @@ enum NatTableError {
 }
 pub struct ConnectionsManager {
     nat_table: SharedNatTable,
+    ports_pool: PortsPool,
 }
 
 impl ConnectionsManager {
-    pub fn build(nat_table: SharedNatTable) -> Self {
-        Self { nat_table }
+    pub fn build(nat_table: SharedNatTable, ports_pool: PortsPool) -> Self {
+        Self {
+            nat_table,
+            ports_pool,
+        }
     }
 
-    pub fn get_nat_table(&self) -> SharedNatTable {
-        Arc::clone(&self.nat_table)
-    }
-
-    pub fn check_connections(&self) -> JoinHandle<()> {
+    pub fn manage_tasks(&self) -> JoinHandle<()> {
         // Implementation for checking and managing connections
         // TODO: I think I should check every connection separetaly
         // and update the state of the TCP connection according to the TCP flags received in the packets.
@@ -370,15 +370,77 @@ impl ConnectionsManager {
     }
 }
 
+pub trait ConnectionHandler {
+    /// Get backend address is the function that will be called by the XDP program to get the backend address to which the packet should be redirected. It takes the client IP and port as parameters
+    /// and returns the backend IP and port if a NAT entry exists for the given client, or None if no NAT entry exists.
+    fn get_backend_address(&self, ip: [u8; 4], port: u16) -> Option<RedirectionAddress>;
+
+    /// This function obtains client address information based on the provided proxy port. It is used to retrieve the original client IP and port associated with a given proxy port,
+    /// which is essential for managing TCP connections and ensuring proper routing of packets back to the client.
+    fn get_client_address(&self, proxy_port: u16) -> Option<RedirectionAddress>;
+}
+
+pub struct AddressProvider {
+    nat_manager: Arc<dyn ConnectionHandler + 'static>,
+}
+
+struct RedirectionAddress {
+    origin_port: u16,
+    backend_ip: [u8; 4],
+    backend_port: u16,
+}
+
+impl AddressProvider {
+    pub fn new(nat_manager: Arc<dyn ConnectionHandler + 'static>) -> Self {
+        Self { nat_manager }
+    }
+
+    pub fn get_backend_address(&self, ip: [u8; 4], port: u16) -> Option<RedirectionAddress> {
+        self.nat_manager.get_backend_address(ip, port)
+    }
+
+    pub fn get_client_address(&self, proxy_port: u16) -> Option<RedirectionAddress> {
+        self.nat_manager.get_client_address(proxy_port)
+    }
+}
+
 // TODO: Still to be implemented. I need to study how to manage connections and the best patterns to follow in this case.
 // I can use this guide: https://www.rfc-editor.org/rfc/rfc793.html and this one too https://medium.com/@itherohit/tcp-connection-establishment-an-in-depth-exploration-46031ef69908
 // Also, I could check how other load balancers do it, like HAProxy and NGINX.
 
+/// Get mutable headers from the raw packet data. This function is used to extract the Ethernet, IPv4, and TCP headers.
+#[inline(always)]
+pub fn get_mut_headers<'a>(
+    frame_data: &'a [u8],
+) -> Option<(&'a mut EthHdr, &'a mut Ipv4Hdr, &'a mut TcpHdr)> {
+    let eth_hdr = unsafe { &mut *(frame_data.as_mut_ptr() as *mut EthHdr) };
+    let ether_type = eth_hdr.ether_type;
+
+    if ether_type != network_types::eth::EtherType::Ipv4 {
+        return None;
+    }
+
+    let ipv4_hdr = unsafe { &mut *(frame_data.as_mut_ptr().add(EthHdr::LEN) as *mut Ipv4Hdr) };
+
+    if ipv4_hdr.proto != network_types::ip::IpProto::Tcp {
+        return None;
+    }
+
+    let tcp_hdr_offset = if ipv4_hdr.ihl() == 5 {
+        EthHdr::LEN + MIN_IPV4_HEADER_LEN
+    } else {
+        EthHdr::LEN + (ipv4_hdr.ihl() as usize) * 4
+    };
+
+    let tcp_hdr = unsafe { &mut *(frame_data.as_mut_ptr().add(tcp_hdr_offset) as *mut TcpHdr) };
+
+    Some((eth_hdr, ipv4_hdr, tcp_hdr))
+}
+
 /// Shift the source and destination MAC addresses in the Ethernet header of the packet. This is necessary to redirect the packet,
 /// if we don't, the kernel will drop the packet because it will think that the packet is coming from internet and not going back to it.
 #[inline(always)]
-pub fn shift_mac(frame_data: &mut [u8]) {
-    let eth_hdr = unsafe { &mut *(frame_data.as_mut_ptr() as *mut EthHdr) };
+pub fn shift_mac(eth_hdr: &mut EthHdr) {
     let src_mac = eth_hdr.src_addr;
     let dst_mac = eth_hdr.dst_addr;
 
@@ -390,26 +452,12 @@ pub fn shift_mac(frame_data: &mut [u8]) {
 // You can check the code on the following link https://docs.rs/internet-checksum/0.2.1/src/internet_checksum/lib.rs.html
 /// Route the packet by modifying the destination IP address and port in the IPv4 and TCP headers, respectively. It also updates the checksums accordingly.
 #[inline(always)]
-pub fn route_packet(frame_data: &mut [u8], ip_dest: [u8; 4], port_dest: u16) -> bool {
-    let eth_hdr = unsafe { std::ptr::read_unaligned(frame_data.as_ptr() as *const EthHdr) };
-    let ether_type = eth_hdr.ether_type;
-
-    // TODO: Maybe I should use likely here to avoid overhead by branch prediction.
-    // Anyway, I don't think this check will be a bottleneck.
-    // Because most of the traffic will be TCP filtered by XDP program
-    if ether_type != network_types::eth::EtherType::Ipv4 {
-        return false;
-    }
-
-    let ipv4_hdr = unsafe { &mut *(frame_data.as_mut_ptr().add(EthHdr::LEN) as *mut Ipv4Hdr) };
-
-    // TODO: Maybe I should use likely here to avoid overhead by branch prediction.
-    // Anyway, I don't think this check will be a bottleneck.
-    // Because most of the traffic will be TCP filtered by XDP program
-    if ipv4_hdr.proto != network_types::ip::IpProto::Tcp {
-        return false;
-    }
-
+pub fn route_packet(
+    ipv4_hdr: &mut Ipv4Hdr,
+    tcp_hdr: &mut TcpHdr,
+    ip_dest: [u8; 4],
+    port_dest: u16,
+) {
     let old_dst_ip = ipv4_hdr.dst_addr;
     let old_src_ip = ipv4_hdr.src_addr;
     let old_csum_ip = ipv4_hdr.check;
@@ -418,14 +466,6 @@ pub fn route_packet(frame_data: &mut [u8], ip_dest: [u8; 4], port_dest: u16) -> 
     ipv4_hdr.dst_addr = ip_dest;
 
     ipv4_hdr.check = update(old_csum_ip, &old_src_ip, &ip_dest);
-
-    let tcp_hdr_offset = if ipv4_hdr.ihl() == 5 {
-        EthHdr::LEN + MIN_IPV4_HEADER_LEN
-    } else {
-        EthHdr::LEN + (ipv4_hdr.ihl() as usize) * 4
-    };
-
-    let tcp_hdr = unsafe { &mut *(frame_data.as_mut_ptr().add(tcp_hdr_offset) as *mut TcpHdr) };
 
     let old_dst_port = tcp_hdr.dest;
     let old_source_port = tcp_hdr.source;
@@ -444,6 +484,4 @@ pub fn route_packet(frame_data: &mut [u8], ip_dest: [u8; 4], port_dest: u16) -> 
 
     // I'm using here from_ne_bytes because update function expects values in native endianess.
     tcp_hdr.check = u16::from_ne_bytes(old_csum_tcp_bytes);
-
-    true
 }
