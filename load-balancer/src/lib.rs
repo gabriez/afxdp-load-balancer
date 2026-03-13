@@ -1,7 +1,8 @@
 pub mod config;
+pub mod connections_balancer;
 pub mod connections_manager;
 pub mod process;
-pub mod tcp_connections_handler;
+pub mod router;
 
 // The TCP flags.
 #[allow(non_snake_case)]

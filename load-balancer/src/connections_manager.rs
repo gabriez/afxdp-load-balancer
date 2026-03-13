@@ -1,145 +1,57 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 use crossbeam_channel::unbounded;
+use log::{error, info, warn};
 use network_types::tcp;
-use tokio::{sync, task::JoinSet};
+use tokio::{sync, sync::RwLock, task::JoinSet};
 use tokio_util::sync::CancellationToken;
 
-use crate::{tcp_connections_handler::PortsPool, TcpFlags, TcpFlagsEnum, TcpState};
-pub struct TcpConnState {
-    last_seen: std::time::Instant, // Timestamp of the last packet seen for this connection, used for timeouts and cleanup
-    last_tcp_flag: TcpFlagsEnum, // The last TCP flag received for this connection, used to manage the state of the TCP connection
-    state: TcpState, // The current state of the TCP connection, used to manage the connection lifecycle
-    last_packet_origin: TcpPacketOrigin,
+use crate::{TcpFlags, TcpFlagsEnum, TcpState};
+
+const MIN_PORT: u16 = 32768;
+const MAX_PORT: u16 = 60999;
+
+/// PortsPool structure to manage the pool of available ports for NAT entries. It keeps track of the maximum number of ports and the number of ports currently available.
+/// It provides methods to get a port from the pool and release a port back to the pool.
+#[derive(Debug)]
+pub struct PortsPool {
+    max_ports: usize,
+    ports_available: usize,
+    ports: Vec<Option<u16>>,
 }
 
-pub struct TcpUpdateState {
-    proxy_port: u16,
-    flag: TcpFlagsEnum, // The current state of the TCP connection, used to manage the connection lifecycle
-    origin: TcpPacketOrigin,
-}
-
-pub struct TcpNewConn {
-    proxy_port: u16,
-    flag: TcpFlagsEnum, // The current state of the TCP connection, used to manage the connection lifecycle
-    origin: TcpPacketOrigin,
-    rx_flag: sync::watch::Receiver<TcpUpdateState>,
-}
-
-pub enum TcpPacketOrigin {
-    Client,
-    Backend,
-}
-
-fn nat_table_manager(rx_proxy_port: crossbeam_channel::Receiver<u16>) {
-    loop {
-        crossbeam_channel::select! {
-            recv(rx_proxy_port) -> rx_proxy_port => {
-                match update {
-                    Ok(conn) => {
-                        // Update the connection state based on the received TcpConnection
-                        println!("Received connection update: {:?}", conn);
-                    },
-                    Err(e) => {
-                        eprintln!("Error receiving connection update: {}", e);
-                    }
-                }
-            }
+impl PortsPool {
+    pub fn new(min_port: u16, max_port: u16) -> Self {
+        let capacity = (max_port - min_port + 1) as usize;
+        let mut ports = Vec::with_capacity(capacity);
+        for i in 0..capacity {
+            ports.push(Some(min_port + i as u16));
         }
-    }
-}
-
-async fn conns_state_manager(
-    mut rx_new_conn: tokio::sync::mpsc::Receiver<TcpNewConn>,
-    tx_proxy_port: crossbeam_channel::Sender<u16>,
-    cancel_token: CancellationToken,
-) {
-    let mut active_conn = JoinSet::new();
-
-    loop {
-        tokio::select! {
-            rrx_new_conn = rx_new_conn => {
-                match rx_new_conn.recv() {
-                    Ok(new_conn) => {
-                        active_conn.spawn(tcp_state_manager(
-                            tx_proxy_port.clone(),
-                            new_conn.rx_flag,
-                            cancel_token.clone(),
-                            new_conn,
-                        ));
-                    },
-                    Err(e) => {
-                        eprintln!("Error receiving new connection: {}", e);
-                    }
-                }
-            }
-            _ = cancel_token.cancelled() => {
-                    println!("Connections state manager received cancellation signal, shutting down.");
-                    break;
-                }
-                Some(join_result) = active_conn.join_next() => {
-                    match join_result {
-                        Ok(_) => {
-                            println!("TCP state manager task completed successfully.");
-                        }
-                        Err(e) => {
-                            eprintln!("Error in TCP state manager task: {}", e);
-                        }
-                    }
-                }
+        Self {
+            max_ports: capacity,
+            ports_available: capacity,
+            ports,
         }
     }
 
-    active_conn.shutdown().await;
-}
+    pub fn get_port(&mut self) -> Option<u16> {
+        if self.ports_available == 0 {
+            return None;
+        }
+        self.ports_available -= 1;
+        self.ports[self.ports_available].take()
+    }
 
-async fn tcp_state_manager(
-    tx_proxy_port: crossbeam_channel::Sender<u16>,
-    rx_event: sync::watch::Receiver<TcpFlagsEnum>,
-    cancel_token: CancellationToken,
-    tcp_new_conn: TcpNewConn,
-) {
-    let mut timeout = tokio::time::sleep(std::time::Duration::from_secs(60)); // TODO: define timeout duration
-    let TcpNewConn {
-        proxy_port,
-        flag,
-        origin,
-        rx_flag,
-    } = tcp_new_conn;
-
-    let mut tcp_state: TcpConnState = TcpConnState {
-        last_seen: std::time::Instant::now(), // Timestamp of the last packet seen for this connection, used for timeouts and cleanup
-        last_tcp_flag: flag, // The last TCP flag received for this connection, used to manage the state of the TCP connection
-        state: if origin == TcpPacketOrigin::Client {
-            TcpState::SynReceived
-        } else {
-            TcpState::SynSent
-        }, // The current state of the TCP connection, used to manage the connection lifecycle
-        last_packet_origin: origin,
-    };
-
-    loop {
-        tokio::select! {
-            _ = &mut timeout => {
-                // Handle connection timeout, e.g., remove the connection from the manager
-                println!("Connection timed out: {:?}", tcp_state);
-                break;
-            }
-            _ = rx_event.changed() => {
-
-                    let new_flag = *rx_event.borrow();
-                    // Update the TCP state based on the new flag
-                    println!("TCP flag changed for connection {:?}: {:?}", tcp_state, new_flag);
-                    // Reset the timeout on activity
-                    timeout = tokio::time::sleep(std::time::Duration::from_secs(60));
-
-            }
-            _ = cancel_token.cancelled() => {
-               return ;
-            }
+    pub fn release_port(&mut self, port: u16) {
+        if self.ports_available < self.max_ports {
+            self.ports[self.ports_available] = Some(port);
+            self.ports_available += 1;
         }
     }
-    tx_port.send(proxy_port);
+
+    pub fn get_max_ports(&self) -> usize {
+        self.max_ports
+    }
 }
 
 /// NatEntry structure to represent a NAT entry in the NAT table. It contains the client IP and port, the destination IP and port, the last seen timestamp, and the state of the TCP connection.
@@ -210,11 +122,17 @@ impl NatTable {
         }
     }
 
-    pub fn close_connection(&mut self, client_key: ClientKey) -> Result<(), NatTableError> {
+    pub fn close_connection(&mut self, port: u16) -> Result<(), NatTableError> {
         // Implementation for closing a connection and cleaning up NAT entries
-        if self.connection_exists(key) {
-            if let Some(port) = self.client_map.remove(&client_key) {
-                self.nat_map.remove(&port);
+        if self.proxy_port_exists(port) {
+            if let Some(NatEntry {
+                client_ip,
+                client_port,
+                ..
+            }) = self.nat_map.remove(&port)
+            {
+                self.client_map
+                    .remove(&ClientKey::new(client_ip, client_port));
                 self.ports_pool.release_port(port);
             }
         } else {
@@ -271,6 +189,10 @@ impl NatTable {
         self.client_map.contains_key(key)
     }
 
+    pub fn proxy_port_exists(&self, port: u16) -> bool {
+        self.nat_map.contains_key(&port)
+    }
+
     pub fn get_active_connections(&self) -> usize {
         self.nat_map.len()
     }
@@ -296,4 +218,123 @@ enum NatTableError {
     NatEntryAlreadyExists,
     #[error("Connection does not exists")]
     ConnectionNotFound,
+}
+
+pub struct TcpConnState {
+    last_seen: std::time::Instant, // Timestamp of the last packet seen for this connection, used for timeouts and cleanup
+    last_tcp_flag: TcpFlagsEnum, // The last TCP flag received for this connection, used to manage the state of the TCP connection
+    state: TcpState, // The current state of the TCP connection, used to manage the connection lifecycle
+    last_packet_origin: TcpPacketOrigin,
+}
+
+pub struct TcpUpdateState {
+    proxy_port: u16,
+    flag: TcpFlagsEnum, // The current state of the TCP connection, used to manage the connection lifecycle
+    origin: TcpPacketOrigin,
+}
+
+pub struct TcpNewConn {
+    proxy_port: u16,
+    flag: TcpFlagsEnum, // The current state of the TCP connection, used to manage the connection lifecycle
+    origin: TcpPacketOrigin,
+    rx_flag: sync::watch::Receiver<TcpUpdateState>,
+}
+
+pub enum TcpPacketOrigin {
+    Client,
+    Backend,
+}
+
+async fn conns_state_manager(
+    mut rx_new_conn: tokio::sync::mpsc::Receiver<TcpNewConn>,
+    cancel_token: CancellationToken,
+    nat_table: SharedNatTable,
+) {
+    let mut active_conn = JoinSet::new();
+    loop {
+        tokio::select! {
+            conn_try = rx_new_conn.recv()  => {
+                match conn_try {
+                    Some(new_conn) => {
+                        active_conn.spawn(tcp_state_manager(
+                            new_conn.rx_flag,
+                            cancel_token.clone(),
+                            new_conn,
+                        ));
+                    },
+                    None => {
+                        warn!("Channel is closed for connections state manager. Finishing task");
+                        break;
+                    }
+                }
+            }
+            _ = cancel_token.cancelled() => {
+                    info!("Connections state manager received cancellation signal, shutting down.");
+                    break;
+                }
+                Some(join_result) = active_conn.join_next() => {
+                    match join_result {
+                        Ok(proxy_port) => {
+                            println!("TCP state manager task completed successfully.");
+                            let mut lock_nat_table = nat_table.write().await;
+                            if let Err(e) =  lock_nat_table.close_connection(proxy_port) {
+                                eprintln!("Error closing connection for proxy port {}: {}", proxy_port, e);
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("Error in TCP state manager task: {}", e);
+                        }
+                    }
+                }
+        }
+    }
+
+    active_conn.shutdown().await;
+}
+
+async fn tcp_state_manager(
+    rx_event: sync::watch::Receiver<TcpUpdateState>,
+    cancel_token: CancellationToken,
+    tcp_new_conn: TcpNewConn,
+) -> u16 {
+    let mut timeout = tokio::time::sleep(std::time::Duration::from_secs(60)); // TODO: define timeout duration
+    let TcpNewConn {
+        proxy_port,
+        flag,
+        origin,
+        rx_flag,
+    } = tcp_new_conn;
+
+    let mut tcp_state: TcpConnState = TcpConnState {
+        last_seen: std::time::Instant::now(), // Timestamp of the last packet seen for this connection, used for timeouts and cleanup
+        last_tcp_flag: flag, // The last TCP flag received for this connection, used to manage the state of the TCP connection
+        state: if origin == TcpPacketOrigin::Client {
+            TcpState::SynReceived
+        } else {
+            TcpState::SynSent
+        }, // The current state of the TCP connection, used to manage the connection lifecycle
+        last_packet_origin: origin,
+    };
+
+    loop {
+        tokio::select! {
+            _ = &mut timeout => {
+                // Handle connection timeout, e.g., remove the connection from the manager
+                println!("Connection timed out: {:?}", tcp_state);
+                return proxy_port;
+            }
+            _ = rx_event.changed() => {
+
+                    let new_flag = *rx_event.borrow();
+                    // Update the TCP state based on the new flag
+                    println!("TCP flag changed for connection {:?}: {:?}", tcp_state, new_flag);
+                    // Reset the timeout on activity
+                    timeout = tokio::time::sleep(std::time::Duration::from_secs(60));
+
+            }
+            _ = cancel_token.cancelled() => {
+               return 0 ;
+            }
+        }
+    }
 }
