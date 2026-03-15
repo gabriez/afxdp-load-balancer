@@ -2,11 +2,11 @@ use std::{collections::HashMap, sync::Arc};
 
 use crossbeam_channel::unbounded;
 use log::{error, info, warn};
-use network_types::tcp;
+use network_types::{ip::Ipv4Hdr, tcp};
 use tokio::{sync, sync::RwLock, task::JoinSet};
 use tokio_util::sync::CancellationToken;
 
-use crate::{TcpFlags, TcpFlagsEnum, TcpState};
+use crate::{connections_balancer::BackendSelector, TcpFlags, TcpFlagsEnum, TcpState};
 
 const MIN_PORT: u16 = 32768;
 const MAX_PORT: u16 = 60999;
@@ -61,11 +61,14 @@ pub struct NatEntry {
     client_port: u16,
     client_ip: [u8; 4],
 
+    // This port refers to the dst port of the TCP packet received from the client.
+    client_dst_port: u16,
+
     // This addresses are the destination addresses to which the proxy port maps
     destination_port: u16,
     destination_ip: [u8; 4],
 
-    tx_flag: sync::watch::Sender<TcpFlagsEnum>,
+    tx_flag: sync::watch::Sender<TcpUpdateState>,
 }
 
 /// ClientKey structure to represent a key for the client map in the NAT table. It contains the client IP and port. This structure is used to quickly look up the NAT entry for a given client.
@@ -81,17 +84,6 @@ impl ClientKey {
             client_ip,
             client_port,
         }
-    }
-}
-
-pub struct AddressProvider {
-    nat_table: SharedNatTable,
-    tx_new_conn: tokio::sync::mpsc::Sender<TcpNewConn>,
-}
-
-impl AddressProvider {
-    pub fn get_address(&self) {
-        // self.tx_new_conn.blocking_send(value)
     }
 }
 
@@ -122,32 +114,27 @@ impl NatTable {
         }
     }
 
-    pub fn close_connection(&mut self, port: u16) -> Result<(), NatTableError> {
+    /// Closes a connection and cleans up the corresponding NAT entry. It takes the proxy port as a parameter, checks if a NAT entry exists for the given port, and if it does, it removes the NAT entry from the nat_map, removes the client mapping from the client_map, releases the proxy port back to the ports pool, and returns the removed NAT entry. If no NAT entry exists for the given port, it returns an error indicating that the connection was not found.
+    pub fn close_connection(&mut self, port: u16) -> Result<NatEntry, NatTableError> {
         // Implementation for closing a connection and cleaning up NAT entries
-        if self.proxy_port_exists(port) {
-            if let Some(NatEntry {
-                client_ip,
-                client_port,
-                ..
-            }) = self.nat_map.remove(&port)
-            {
-                self.client_map
-                    .remove(&ClientKey::new(client_ip, client_port));
-                self.ports_pool.release_port(port);
-            }
+
+        if let Some(nat_entry) = self.nat_map.remove(&port) {
+            self.client_map
+                .remove(&ClientKey::new(nat_entry.client_ip, nat_entry.client_port));
+            self.ports_pool.release_port(port);
+            return Ok(nat_entry);
         } else {
             return Err(NatTableError::ConnectionNotFound);
         }
-        Ok(())
     }
 
     pub fn new_conn(
         &mut self,
         client_port: u16,
         client_ip: [u8; 4],
+        client_dst_port: u16,
         destination_port: u16,
         destination_ip: [u8; 4],
-        tx_flag: sync::watch::Sender<TcpFlagsEnum>,
     ) -> Result<(u16, NatEntry), NatTableError> {
         let proxy_port = match self.ports_pool.get_port() {
             Some(port) => port,
@@ -160,9 +147,14 @@ impl NatTable {
         let nat_entry = NatEntry {
             client_port,
             client_ip,
+            client_dst_port,
             destination_port,
             destination_ip,
-            tx_flag,
+            tx_flag: sync::watch::channel(TcpUpdateState {
+                flag: TcpFlagsEnum::SYN,
+                origin: TcpPacketOrigin::Client,
+            })
+            .0,
         };
 
         let client_key = ClientKey::new(client_ip, client_port);
@@ -185,11 +177,11 @@ impl NatTable {
         self.nat_map.get(&port)
     }
 
-    pub fn connection_exists(&self, key: &ClientKey) -> bool {
+    pub fn client_key_exists(&self, key: &ClientKey) -> bool {
         self.client_map.contains_key(key)
     }
 
-    pub fn proxy_port_exists(&self, port: u16) -> bool {
+    pub fn nat_entry_exists(&self, port: u16) -> bool {
         self.nat_map.contains_key(&port)
     }
 
@@ -228,7 +220,6 @@ pub struct TcpConnState {
 }
 
 pub struct TcpUpdateState {
-    proxy_port: u16,
     flag: TcpFlagsEnum, // The current state of the TCP connection, used to manage the connection lifecycle
     origin: TcpPacketOrigin,
 }
@@ -308,11 +299,8 @@ async fn tcp_state_manager(
     let mut tcp_state: TcpConnState = TcpConnState {
         last_seen: std::time::Instant::now(), // Timestamp of the last packet seen for this connection, used for timeouts and cleanup
         last_tcp_flag: flag, // The last TCP flag received for this connection, used to manage the state of the TCP connection
-        state: if origin == TcpPacketOrigin::Client {
-            TcpState::SynReceived
-        } else {
-            TcpState::SynSent
-        }, // The current state of the TCP connection, used to manage the connection lifecycle
+        state: TcpState::SynReceived,
+        // The current state of the TCP connection, used to manage the connection lifecycle
         last_packet_origin: origin,
     };
 
@@ -326,6 +314,8 @@ async fn tcp_state_manager(
             _ = rx_event.changed() => {
 
                     let new_flag = *rx_event.borrow();
+
+
                     // Update the TCP state based on the new flag
                     println!("TCP flag changed for connection {:?}: {:?}", tcp_state, new_flag);
                     // Reset the timeout on activity
@@ -337,4 +327,203 @@ async fn tcp_state_manager(
             }
         }
     }
+}
+
+#[derive(Debug)]
+pub struct RedirectionAddress {
+    pub origin_port: u16,
+    pub dest_ip: [u8; 4],
+    pub dest_port: u16,
+}
+
+/// AddressProvider structure provides an API to interact with the NatTable and control TCP connections state.
+/// It holds a reference to the shared NAT table and a channel sender to send new connection events to the connections state manager.
+pub struct AddressProvider {
+    nat_table: SharedNatTable,
+    tx_new_conn: tokio::sync::mpsc::Sender<TcpNewConn>,
+    backends: Arc<RwLock<dyn BackendSelector + 'static + Send>>,
+}
+
+impl AddressProvider {
+    pub fn new(
+        nat_table: SharedNatTable,
+        tx_new_conn: tokio::sync::mpsc::Sender<TcpNewConn>,
+        backends: Arc<RwLock<dyn BackendSelector + 'static + Send>>,
+    ) -> Self {
+        Self {
+            nat_table,
+            tx_new_conn,
+            backends,
+        }
+    }
+
+    pub fn check_origin(&self, ip: [u8; 4], port: u16) -> TcpPacketOrigin {
+        let backends = self.backends.blocking_read();
+        if backends.backend_exist(ip, port) {
+            TcpPacketOrigin::Backend
+        } else {
+            TcpPacketOrigin::Client
+        }
+    }
+
+    pub fn get_redirection_addr(
+        &self,
+        ipv4_hdr: &Ipv4Hdr,
+        tcp_hdr: &tcp::TcpHdr,
+    ) -> Option<RedirectionAddress> {
+        let origin = self.check_origin(ipv4_hdr.src_addr, tcp_hdr.src_port);
+        match origin {
+            TcpPacketOrigin::Client => {
+                if let Some((addr, tx)) =
+                    self.get_backend_address(ipv4_hdr.src_addr, tcp_hdr.source)
+                {
+                    // tx.send(values::tcp::TcpUpdateState {
+                    //     flag: TcpFlagsEnum::SYN,
+                    //     origin: TcpPacketOrigin::Client,
+                    // })
+                    return Some(addr);
+                }
+
+                self.new_connection(ipv4_hdr.src_addr, tcp_hdr.source, tcp_hdr.dest)
+            }
+            TcpPacketOrigin::Backend => {
+                if let Some((addr, tx)) = self.get_client_address(tcp_hdr.dest) {
+                    //  tx.send(values::tcp::TcpUpdateState {
+                    //         flag: TcpFlagsEnum::SYN,
+                    //         origin: TcpPacketOrigin::Backend,
+                    //     })
+                    return Some(addr);
+                }
+                None
+            }
+        }
+    }
+
+    pub fn new_connection(
+        &self,
+        client_ip: [u8; 4],
+        client_port: u16,
+        client_dst_port: u16,
+    ) -> Option<RedirectionAddress> {
+        let destination = {
+            let mut backends = self.backends.blocking_write();
+            backends.select_backend()
+        };
+        if let Some((destination_ip, destination_port)) = destination {
+            let mut lock_nat_table = self.nat_table.blocking_write();
+            match lock_nat_table.new_conn(
+                client_port,
+                client_ip,
+                client_dst_port,
+                destination_port,
+                destination_ip,
+            ) {
+                Ok((proxy_port, nat_entry)) => {
+                    let tcp_new_conn = TcpNewConn {
+                        proxy_port,
+                        flag: TcpFlagsEnum::SYN,
+                        origin: TcpPacketOrigin::Client,
+                        rx_flag: nat_entry.tx_flag.subscribe(),
+                    };
+                    if let Err(e) = self.tx_new_conn.blocking_send(tcp_new_conn) {
+                        error!(
+                            "Failed to send new connection event to state manager: {}",
+                            e
+                        );
+                    }
+                    let mut backends = self.backends.blocking_write();
+                    backends.increase_conn(destination_ip, destination_port);
+                    Some(RedirectionAddress {
+                        origin_port: proxy_port,
+                        dest_ip: destination_ip,
+                        dest_port: destination_port,
+                    })
+                }
+                Err(e) => {
+                    error!(
+                        "Failed to create new NAT entry for client {}:{} -> {}:{} : {}",
+                        client_ip
+                            .iter()
+                            .map(|b| b.to_string())
+                            .collect::<Vec<String>>()
+                            .join("."),
+                        client_port,
+                        destination_ip
+                            .iter()
+                            .map(|b| b.to_string())
+                            .collect::<Vec<String>>()
+                            .join("."),
+                        destination_port,
+                        e
+                    );
+                    None
+                }
+            }
+        } else {
+            warn!(
+                "No backend available for new connection from client {}:{} -> {}:{}",
+                client_ip
+                    .iter()
+                    .map(|b| b.to_string())
+                    .collect::<Vec<String>>()
+                    .join("."),
+                client_port,
+                "N/A",
+                "N/A"
+            );
+            None
+        }
+    }
+
+    pub fn get_backend_address(
+        &self,
+        ip: [u8; 4],
+        port: u16,
+    ) -> Option<(RedirectionAddress, sync::watch::Sender<TcpUpdateState>)> {
+        let client_key = ClientKey::new(ip, port);
+        let mut lock_nat_table = self.nat_table.blocking_read();
+
+        if lock_nat_table.client_key_exists(&client_key) {
+            if let Some(proxy_port) = lock_nat_table.get_connection_port(&client_key) {
+                if let Some(nat_entry) = lock_nat_table.get_nat_entry(proxy_port) {
+                    return Some((
+                        RedirectionAddress {
+                            origin_port: proxy_port,
+                            dest_ip: nat_entry.destination_ip,
+                            dest_port: nat_entry.destination_port,
+                        },
+                        nat_entry.tx_flag.clone(),
+                    ));
+                }
+            }
+        }
+
+        None
+    }
+
+    pub fn get_client_address(
+        &self,
+        proxy_port: u16,
+    ) -> Option<(RedirectionAddress, sync::watch::Sender<TcpUpdateState>)> {
+        let lock_nat_table = self.nat_table.blocking_read();
+
+        if let Some(nat_entry) = lock_nat_table.get_nat_entry(proxy_port) {
+            return Some((
+                RedirectionAddress {
+                    origin_port: nat_entry.client_dst_port,
+                    dest_ip: nat_entry.client_ip,
+                    dest_port: nat_entry.client_port,
+                },
+                nat_entry.tx_flag.clone(),
+            ));
+        }
+
+        None
+    }
+}
+
+pub trait RouteAddress {
+    fn get_backend_address(&self, ip: [u8; 4], port: u16) -> Option<RedirectionAddress>;
+    fn get_client_address(&self, proxy_port: u16) -> Option<RedirectionAddress>;
+    fn check_origin(&self, ip: [u8; 4], port: u16) -> TcpPacketOrigin;
 }
