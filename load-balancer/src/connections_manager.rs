@@ -1,12 +1,12 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, sync::Arc, time::Instant};
 
-use crossbeam_channel::unbounded;
 use log::{error, info, warn};
 use network_types::{ip::Ipv4Hdr, tcp};
+use thiserror::Error;
 use tokio::{sync, sync::RwLock, task::JoinSet};
 use tokio_util::sync::CancellationToken;
 
-use crate::{connections_balancer::BackendSelector, TcpFlags, TcpFlagsEnum, TcpState};
+use crate::{connections_balancer::BackendSelector, TcpFlagsEnum, TcpState};
 
 const MIN_PORT: u16 = 32768;
 const MAX_PORT: u16 = 60999;
@@ -55,7 +55,7 @@ impl PortsPool {
 }
 
 /// NatEntry structure to represent a NAT entry in the NAT table. It contains the client IP and port, the destination IP and port, the last seen timestamp, and the state of the TCP connection.
-#[derive(Hash, Eq, PartialEq)]
+#[derive(Clone)]
 pub struct NatEntry {
     // These addresses are the origin addresses from which the connection starts
     client_port: u16,
@@ -98,12 +98,6 @@ pub struct NatTable {
     /// Manages the pool of available ports for NAT entries. It keeps track of the maximum number of ports and the number of ports currently available, and provides methods to get a port from the pool and release a port back to the pool.
     ports_pool: PortsPool,
 }
-
-pub trait NatConnections {
-    // TODO:
-}
-
-pub type SharedNatTable = Arc<RwLock<NatTable>>;
 
 impl NatTable {
     pub fn new(ports_pool: PortsPool) -> Self {
@@ -200,8 +194,84 @@ impl Default for NatTable {
     }
 }
 
-#[thiserror::Error]
-enum NatTableError {
+pub trait NatTableManager {
+    /// Takes a proxy port as a parameter, checks if a NAT entry exists for the given port, and if it does,
+    /// it removes the NAT entry from the nat_map, removes the client mapping from the client_map, releases the proxy port back to the ports pool, and returns the removed NAT entry. If no NAT entry exists for the given port, it returns an error indicating that the connection was not found.
+    fn close_connection(&mut self, port: u16) -> Result<NatEntry, NatTableError>;
+
+    /// Creates a new NAT entry for a given client IP and port, destination IP and port, and returns
+    /// the assigned proxy port along with the created NAT entry. It first checks if there are available ports
+    /// in the ports pool, and if there are, it assigns a proxy port from the pool. It then creates a new NAT entry with the provided client and destination information, and updates the nat_map and client_map accordingly. If no ports are available in the pool, or if a NAT entry already exists for the given client or proxy port, it returns an error indicating the issue.
+    fn new_conn(
+        &mut self,
+        client_port: u16,
+        client_ip: [u8; 4],
+        client_dst_port: u16,
+        destination_port: u16,
+        destination_ip: [u8; 4],
+    ) -> Result<(u16, NatEntry), NatTableError>;
+
+    /// Takes a proxy port as a parameter and returns the corresponding NAT entry if it exists, or None if no NAT entry exists for the given port. This method allows for quick lookups of NAT entries based on the proxy port used in the TCP connection.
+    fn get_nat_entry(&self, port: u16) -> Option<&NatEntry>;
+
+    /// Checks if a client key (combination of client IP and port) exists in the client_map. It takes a ClientKey as a parameter and returns true if the client key exists in the client_map, or false if it does not. This method is useful for quickly determining if a NAT entry exists for a given client without needing to look up the proxy port first.
+    fn client_key_exists(&self, key: &ClientKey) -> bool;
+
+    /// Checks if a NAT entry exists for a given proxy port. It takes a proxy port as a parameter and returns true if a NAT entry exists for the given port in the nat_map, or false if it does not. This method allows for quick checks of the existence of NAT entries based on the proxy port used in the TCP connection.
+    fn nat_entry_exists(&self, port: u16) -> bool;
+
+    /// Returns the number of active connections currently managed by the NAT table. This method can be used to monitor the load on the NAT table and make decisions about resource management or scaling based on the number of active connections.
+    fn get_active_connections(&self) -> usize;
+
+    /// Takes a ClientKey as a parameter and returns the corresponding proxy port if a NAT entry exists for the given client key, or None if no NAT entry exists. This method allows for quick lookups of the proxy port associated with a given client IP and port, which can be useful for managing TCP connections and routing packets back to the client.
+    fn get_connection_port(&self, key: &ClientKey) -> Option<u16>;
+}
+
+impl NatTableManager for NatTable {
+    fn close_connection(&mut self, port: u16) -> Result<NatEntry, NatTableError> {
+        self.close_connection(port)
+    }
+
+    fn new_conn(
+        &mut self,
+        client_port: u16,
+        client_ip: [u8; 4],
+        client_dst_port: u16,
+        destination_port: u16,
+        destination_ip: [u8; 4],
+    ) -> Result<(u16, NatEntry), NatTableError> {
+        self.new_conn(
+            client_port,
+            client_ip,
+            client_dst_port,
+            destination_port,
+            destination_ip,
+        )
+    }
+
+    fn get_nat_entry(&self, port: u16) -> Option<&NatEntry> {
+        self.get_nat_entry(port)
+    }
+
+    fn client_key_exists(&self, key: &ClientKey) -> bool {
+        self.client_key_exists(key)
+    }
+
+    fn nat_entry_exists(&self, port: u16) -> bool {
+        self.nat_entry_exists(port)
+    }
+
+    fn get_active_connections(&self) -> usize {
+        self.get_active_connections()
+    }
+
+    fn get_connection_port(&self, key: &ClientKey) -> Option<u16> {
+        self.get_connection_port(key)
+    }
+}
+
+#[derive(Error, Debug)]
+pub enum NatTableError {
     #[error("No available ports in the pool")]
     NoAvailablePorts,
     #[error("NAT entry not found for the given port")]
@@ -212,6 +282,7 @@ enum NatTableError {
     ConnectionNotFound,
 }
 
+#[derive(Debug, Clone)]
 pub struct TcpConnState {
     last_seen: std::time::Instant, // Timestamp of the last packet seen for this connection, used for timeouts and cleanup
     last_tcp_flag: TcpFlagsEnum, // The last TCP flag received for this connection, used to manage the state of the TCP connection
@@ -219,11 +290,13 @@ pub struct TcpConnState {
     last_packet_origin: TcpPacketOrigin,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TcpUpdateState {
     flag: TcpFlagsEnum, // The current state of the TCP connection, used to manage the connection lifecycle
     origin: TcpPacketOrigin,
 }
 
+#[derive(Debug, Clone)]
 pub struct TcpNewConn {
     proxy_port: u16,
     flag: TcpFlagsEnum, // The current state of the TCP connection, used to manage the connection lifecycle
@@ -231,15 +304,16 @@ pub struct TcpNewConn {
     rx_flag: sync::watch::Receiver<TcpUpdateState>,
 }
 
+#[derive(Copy, Debug, Clone, PartialEq, Eq, Hash)]
 pub enum TcpPacketOrigin {
     Client,
     Backend,
 }
 
-async fn conns_state_manager(
+async fn connections_manager(
     mut rx_new_conn: tokio::sync::mpsc::Receiver<TcpNewConn>,
     cancel_token: CancellationToken,
-    nat_table: SharedNatTable,
+    nat_table: Arc<RwLock<dyn NatTableManager + 'static + Send + Sync>>,
 ) {
     let mut active_conn = JoinSet::new();
     loop {
@@ -248,7 +322,6 @@ async fn conns_state_manager(
                 match conn_try {
                     Some(new_conn) => {
                         active_conn.spawn(tcp_state_manager(
-                            new_conn.rx_flag,
                             cancel_token.clone(),
                             new_conn,
                         ));
@@ -283,18 +356,20 @@ async fn conns_state_manager(
     active_conn.shutdown().await;
 }
 
-async fn tcp_state_manager(
-    rx_event: sync::watch::Receiver<TcpUpdateState>,
-    cancel_token: CancellationToken,
-    tcp_new_conn: TcpNewConn,
-) -> u16 {
-    let mut timeout = tokio::time::sleep(std::time::Duration::from_secs(60)); // TODO: define timeout duration
+// TODO: I need to study how to manage connections and the best patterns to follow in this case.
+// I can use this guide: https://www.rfc-editor.org/rfc/rfc793.html and this one too https://medium.com/@itherohit/tcp-connection-establishment-an-in-depth-exploration-46031ef69908
+// Also, I could check how other load balancers do it, like HAProxy and NGINX.
+
+async fn tcp_state_manager(cancel_token: CancellationToken, tcp_new_conn: TcpNewConn) -> u16 {
+    let mut timeout = tokio::time::sleep(tokio::time::Duration::from_secs(60)); // TODO: define timeout duration
     let TcpNewConn {
         proxy_port,
         flag,
         origin,
         rx_flag,
     } = tcp_new_conn;
+
+    tokio::pin!(timeout);
 
     let mut tcp_state: TcpConnState = TcpConnState {
         last_seen: std::time::Instant::now(), // Timestamp of the last packet seen for this connection, used for timeouts and cleanup
@@ -304,6 +379,8 @@ async fn tcp_state_manager(
         last_packet_origin: origin,
     };
 
+    let mut rx_flag_notified = rx_flag.clone();
+
     loop {
         tokio::select! {
             _ = &mut timeout => {
@@ -311,16 +388,15 @@ async fn tcp_state_manager(
                 println!("Connection timed out: {:?}", tcp_state);
                 return proxy_port;
             }
-            _ = rx_event.changed() => {
+            _ = rx_flag_notified.changed() => {
 
-                    let new_flag = *rx_event.borrow();
+                    let new_flag = rx_flag.borrow();
 
 
                     // Update the TCP state based on the new flag
                     println!("TCP flag changed for connection {:?}: {:?}", tcp_state, new_flag);
                     // Reset the timeout on activity
-                    timeout = tokio::time::sleep(std::time::Duration::from_secs(60));
-
+                    timeout.as_mut().reset(tokio::time::Instant::now() + tokio::time::Duration::from_secs(60));
             }
             _ = cancel_token.cancelled() => {
                return 0 ;
@@ -338,17 +414,18 @@ pub struct RedirectionAddress {
 
 /// AddressProvider structure provides an API to interact with the NatTable and control TCP connections state.
 /// It holds a reference to the shared NAT table and a channel sender to send new connection events to the connections state manager.
+#[derive(Clone)]
 pub struct AddressProvider {
-    nat_table: SharedNatTable,
-    tx_new_conn: tokio::sync::mpsc::Sender<TcpNewConn>,
-    backends: Arc<RwLock<dyn BackendSelector + 'static + Send>>,
+    nat_table: Arc<RwLock<dyn NatTableManager + 'static + Send + Sync>>,
+    tx_new_conn: sync::mpsc::Sender<TcpNewConn>,
+    backends: Arc<RwLock<dyn BackendSelector + 'static + Send + Sync>>,
 }
 
 impl AddressProvider {
     pub fn new(
-        nat_table: SharedNatTable,
+        nat_table: Arc<RwLock<dyn NatTableManager + 'static + Send + Sync>>,
         tx_new_conn: tokio::sync::mpsc::Sender<TcpNewConn>,
-        backends: Arc<RwLock<dyn BackendSelector + 'static + Send>>,
+        backends: Arc<RwLock<dyn BackendSelector + 'static + Send + Sync>>,
     ) -> Self {
         Self {
             nat_table,
@@ -371,16 +448,15 @@ impl AddressProvider {
         ipv4_hdr: &Ipv4Hdr,
         tcp_hdr: &tcp::TcpHdr,
     ) -> Option<RedirectionAddress> {
-        let origin = self.check_origin(ipv4_hdr.src_addr, tcp_hdr.src_port);
+        let origin = self.check_origin(ipv4_hdr.src_addr, tcp_hdr.source);
+        let flag = TcpFlagsEnum::from_tcp_hdr(&tcp_hdr);
+
         match origin {
             TcpPacketOrigin::Client => {
                 if let Some((addr, tx)) =
                     self.get_backend_address(ipv4_hdr.src_addr, tcp_hdr.source)
                 {
-                    // tx.send(values::tcp::TcpUpdateState {
-                    //     flag: TcpFlagsEnum::SYN,
-                    //     origin: TcpPacketOrigin::Client,
-                    // })
+                    tx.send(TcpUpdateState { flag, origin });
                     return Some(addr);
                 }
 
@@ -388,10 +464,7 @@ impl AddressProvider {
             }
             TcpPacketOrigin::Backend => {
                 if let Some((addr, tx)) = self.get_client_address(tcp_hdr.dest) {
-                    //  tx.send(values::tcp::TcpUpdateState {
-                    //         flag: TcpFlagsEnum::SYN,
-                    //         origin: TcpPacketOrigin::Backend,
-                    //     })
+                    tx.send(TcpUpdateState { flag, origin });
                     return Some(addr);
                 }
                 None
@@ -481,7 +554,7 @@ impl AddressProvider {
         port: u16,
     ) -> Option<(RedirectionAddress, sync::watch::Sender<TcpUpdateState>)> {
         let client_key = ClientKey::new(ip, port);
-        let mut lock_nat_table = self.nat_table.blocking_read();
+        let lock_nat_table = self.nat_table.blocking_read();
 
         if lock_nat_table.client_key_exists(&client_key) {
             if let Some(proxy_port) = lock_nat_table.get_connection_port(&client_key) {
@@ -523,7 +596,44 @@ impl AddressProvider {
 }
 
 pub trait RouteAddress {
-    fn get_backend_address(&self, ip: [u8; 4], port: u16) -> Option<RedirectionAddress>;
-    fn get_client_address(&self, proxy_port: u16) -> Option<RedirectionAddress>;
-    fn check_origin(&self, ip: [u8; 4], port: u16) -> TcpPacketOrigin;
+    /// Get redirection address is the function that will be called by the XDP program to get the backend address to which the packet should be redirected. It takes the ipv4_header and tpc_header as parameters
+    /// and returns the backend IP and port if a NAT entry exists for the given client, or None if no NAT entry exists. This function is responsible for determining the appropriate redirection address based on the incoming packet's headers and the current state of the NAT table.
+    fn get_redirection_addr(
+        &self,
+        ipv4_hdr: &Ipv4Hdr,
+        tcp_hdr: &tcp::TcpHdr,
+    ) -> Option<RedirectionAddress>;
+}
+
+impl RouteAddress for AddressProvider {
+    fn get_redirection_addr(
+        &self,
+        ipv4_hdr: &Ipv4Hdr,
+        tcp_hdr: &tcp::TcpHdr,
+    ) -> Option<RedirectionAddress> {
+        self.get_redirection_addr(ipv4_hdr, tcp_hdr)
+    }
+}
+
+/// build_connections_manager is a function that initializes the connections manager and returns a tuple containing a function to start the connections manager task and an AddressProvider instance. The connections manager task is responsible for managing the state of active TCP connections,
+/// including handling new connection events, updating connection states based on TCP flags, and cleaning up connections that have timed out.
+/// The AddressProvider instance provides an API to interact with the NAT table and control TCP connection states, allowing for the retrieval of redirection addresses and the management of new connections.
+/// The address provider can be used in multiple threads, but if every instance is dropped, then the connections manager will stop working, since it relies on the channel to receive new connection events.
+/// This follows a frontend - backend pattern.
+pub fn build_connections_manager(
+    nat_table: Arc<RwLock<dyn NatTableManager + 'static + Send + Sync>>,
+    backends: Arc<RwLock<dyn BackendSelector + 'static + Send + Sync>>,
+) -> (
+    impl FnOnce(CancellationToken) -> tokio::task::JoinHandle<()>,
+    AddressProvider,
+) {
+    let (tx_new_conn, rx_new_conn) = tokio::sync::mpsc::channel(100);
+    let address_provider =
+        AddressProvider::new(Arc::clone(&nat_table), tx_new_conn.clone(), backends);
+
+    let manager_handle = move |cancel_token: CancellationToken| {
+        tokio::spawn(connections_manager(rx_new_conn, cancel_token, nat_table))
+    };
+
+    (manager_handle, address_provider)
 }

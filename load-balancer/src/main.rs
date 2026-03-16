@@ -17,6 +17,10 @@ use aya::{
 use clap::Parser;
 use load_balancer::{
     config::Config,
+    connections_balancer::{BackendSelector, Backends},
+    connections_manager::{
+        build_connections_manager, NatTable, NatTableManager, PortsPool, SharedNatTable,
+    },
     process::{
         free_tx_frames, insert_frames_fill_ring, process_packets, receive_packets, recycle_frames,
         release_cq_frames, send_packets, FramesManager, FRAME_COUNT, PACKETS_BATCH,
@@ -24,7 +28,8 @@ use load_balancer::{
 };
 use load_balancer_common::MAX_BLOCKLIST_ENTRIES;
 use log::{debug, warn};
-use tokio::signal;
+use tokio::{signal, sync::RwLock as TkRwLock};
+use tokio_util::sync::CancellationToken;
 
 const FRAME_SIZE: usize = 4096;
 const RING_SIZE: usize = 4096;
@@ -46,18 +51,45 @@ struct Opt {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Here we will pass the channel to the async function that will shutdown the program
-    // I might be using a oneshot channel for that purpose
-    run_af_xdp_socket().await?;
-    let ctrl_c = signal::ctrl_c();
+    let mut fut_joinset = tokio::task::JoinSet::new();
+    let cancellation_token = tokio_util::sync::CancellationToken::new();
+    let backends_manager = Backends::new();
+    let shared_backends = Arc::new(TkRwLock::new(backends_manager));
+
+    // TODO: implement configuration for PortsPool, meanwhile we are using NatTable default to avoid configuration
+    // let ports_pool = PortsPool::new(min_port, max_port);
+    let nat_table = NatTable::default();
+    let shared_nat_table = Arc::new(TkRwLock::new(nat_table))
+        as Arc<TkRwLock<dyn NatTableManager + 'static + Send + Sync>>;
+
+    let backends_manager = Backends::new();
+    let shared_backends = Arc::new(TkRwLock::new(backends_manager));
+
+    let (nat_table_manager, address_provider) = build_connections_manager(
+        shared_nat_table,
+        Arc::clone(&shared_backends) as Arc<TkRwLock<dyn BackendSelector + 'static + Send + Sync>>,
+    );
+
+    fut_joinset.spawn(async { nat_table_manager(cancellation_token.clone()).await });
+    fut_joinset.spawn(async {
+        let ctrl_c = signal::ctrl_c();
+        ctrl_c.await?;
+        cancellation_token.clone().cancel();
+    });
+
+    fut_joinset.spawn(async {
+        _ = run_af_xdp_socket(cancellation_token).await;
+    });
     println!("Waiting for Ctrl-C...");
-    ctrl_c.await?;
+    for fut in fut_joinset.join_next().await {
+        fut??;
+    }
     println!("Exiting...");
 
     Ok(())
 }
 
-async fn run_af_xdp_socket() -> anyhow::Result<()> {
+async fn run_af_xdp_socket(cancellation_token: CancellationToken) -> anyhow::Result<()> {
     let opt: Opt = Opt::parse();
     let Opt {
         iface,

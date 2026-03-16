@@ -1,8 +1,6 @@
-use std::{collections::HashMap, sync::Arc};
+use std::collections::HashMap;
 
-use aya::maps::HashMap;
 use fastrand::usize;
-use tokio::sync::RwLock;
 /// This file contains logic related to load balancing client requests across multiple backend servers
 /// here is the core logic that decides which backend server to use for a given client request
 
