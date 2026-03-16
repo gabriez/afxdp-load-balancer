@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc, time::Instant};
+use std::{collections::HashMap, sync::Arc};
 
 use log::{error, info, warn};
 use network_types::{ip::Ipv4Hdr, tcp};
@@ -24,6 +24,7 @@ impl PortsPool {
     pub fn new(min_port: u16, max_port: u16) -> Self {
         let capacity = (max_port - min_port + 1) as usize;
         let mut ports = Vec::with_capacity(capacity);
+        // TODO: check if I should convert to big endian
         for i in 0..capacity {
             ports.push(Some(min_port + i as u16));
         }
@@ -116,9 +117,9 @@ impl NatTable {
             self.client_map
                 .remove(&ClientKey::new(nat_entry.client_ip, nat_entry.client_port));
             self.ports_pool.release_port(port);
-            return Ok(nat_entry);
+            Ok(nat_entry)
         } else {
-            return Err(NatTableError::ConnectionNotFound);
+            Err(NatTableError::ConnectionNotFound)
         }
     }
 
@@ -184,7 +185,7 @@ impl NatTable {
     }
 
     pub fn get_connection_port(&self, key: &ClientKey) -> Option<u16> {
-        self.client_map.get(&key).cloned()
+        self.client_map.get(key).cloned()
     }
 }
 
@@ -361,7 +362,7 @@ async fn connections_manager(
 // Also, I could check how other load balancers do it, like HAProxy and NGINX.
 
 async fn tcp_state_manager(cancel_token: CancellationToken, tcp_new_conn: TcpNewConn) -> u16 {
-    let mut timeout = tokio::time::sleep(tokio::time::Duration::from_secs(60)); // TODO: define timeout duration
+    let timeout = tokio::time::sleep(tokio::time::Duration::from_secs(60)); // TODO: define timeout duration
     let TcpNewConn {
         proxy_port,
         flag,

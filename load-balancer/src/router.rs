@@ -4,9 +4,7 @@ use network_types::{eth::EthHdr, ip::Ipv4Hdr, tcp::TcpHdr};
 
 /// Get mutable headers from the raw packet data. This function is used to extract the Ethernet, IPv4, and TCP headers.
 #[inline(always)]
-pub fn get_mut_headers<'a>(
-    frame_data: &'a mut [u8],
-) -> Option<(&'a mut EthHdr, &'a mut Ipv4Hdr, &'a mut TcpHdr)> {
+pub fn get_mut_headers(frame_data: &mut [u8]) -> Option<(&mut EthHdr, &mut Ipv4Hdr, &mut TcpHdr)> {
     let eth_hdr = unsafe { &mut *(frame_data.as_mut_ptr() as *mut EthHdr) };
     let ether_type = eth_hdr.ether_type;
 
@@ -51,6 +49,7 @@ pub fn route_packet(
     tcp_hdr: &mut TcpHdr,
     ip_dest: [u8; 4],
     port_dest: u16,
+    port_origin: u16,
 ) {
     let old_dst_ip = ipv4_hdr.dst_addr;
     let old_src_ip = ipv4_hdr.src_addr;
@@ -65,13 +64,19 @@ pub fn route_packet(
     let old_source_port = tcp_hdr.source;
     let mut old_csum_tcp_bytes = tcp_hdr.check.to_be_bytes();
 
-    tcp_hdr.source = old_dst_port;
+    tcp_hdr.source = port_origin.to_be();
     tcp_hdr.dest = port_dest.to_be();
 
     old_csum_tcp_bytes = update(
         old_csum_tcp_bytes,
-        &old_source_port.to_be_bytes(),
+        &old_dst_port.to_be_bytes(),
         &port_dest.to_be_bytes(),
+    );
+
+    old_csum_tcp_bytes = update(
+        old_csum_tcp_bytes,
+        &old_source_port.to_be_bytes(),
+        &port_origin.to_be_bytes(),
     );
 
     old_csum_tcp_bytes = update(old_csum_tcp_bytes, &old_src_ip, &ip_dest);

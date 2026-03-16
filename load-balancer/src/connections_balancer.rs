@@ -1,10 +1,10 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use fastrand::usize;
 /// This file contains logic related to load balancing client requests across multiple backend servers
 /// here is the core logic that decides which backend server to use for a given client request
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Backends {
     /// Maps backend server address to active connections. This structure is used to keep track of the number of active connections for each backend server.
     /// The purpose of using a HashMap is to allow for efficient lookups and updates of the active connection counts for each backend server.
@@ -13,12 +13,16 @@ pub struct Backends {
     backends: Vec<([u8; 4], u16)>,
 }
 
+// TODO: check if I should convert to big endian
 impl Backends {
-    pub fn new() -> Self {
-        Self {
-            backends: Vec::new(),
-            counter: HashMap::new(),
-        }
+    pub fn new(backends_unfilter: Vec<([u8; 4], u16)>) -> Self {
+        let filtered_backends = backends_unfilter.into_iter().collect::<HashSet<_>>();
+        let counter = filtered_backends
+            .iter()
+            .map(|&backend| (backend, 0))
+            .collect::<HashMap<_, _>>();
+        let backends = filtered_backends.into_iter().collect::<Vec<_>>();
+        Self { backends, counter }
     }
 
     /// Returns a clone of the current list of backends and their active connection counts. This method is useful for retrieving the current state of the backends without modifying it.
@@ -59,9 +63,9 @@ impl Backends {
             let address1 = &self.backends[random_index];
             let address2 = &self.backends[random_index2];
 
-            let act_conn1 = self.counter.get(&(*address1)).cloned().unwrap_or(0);
+            let act_conn1 = self.counter.get(address1).cloned().unwrap_or(0);
 
-            let act_conn2 = self.counter.get(&(*address2)).cloned().unwrap_or(0);
+            let act_conn2 = self.counter.get(address2).cloned().unwrap_or(0);
 
             if act_conn1 > act_conn2 {
                 Some(*address2)
