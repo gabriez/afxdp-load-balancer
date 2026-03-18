@@ -501,7 +501,6 @@ dependencies = [
  "aya-build",
  "aya-log",
  "clap",
- "crossbeam-channel",
  "env_logger",
  "fastrand",
  "internet-checksum",

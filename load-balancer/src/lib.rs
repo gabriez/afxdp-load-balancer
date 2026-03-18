@@ -6,7 +6,7 @@ use thiserror::Error;
 pub mod config;
 pub mod connections_balancer;
 pub mod connections_manager;
-pub mod process;
+pub mod pipeline;
 pub mod router;
 
 // The TCP flags.
