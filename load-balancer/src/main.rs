@@ -253,8 +253,12 @@ fn build_thread_tx_loop(
         insert_frames_fill_ring(&mut fill_ring, &mut frames_manager);
         fill_ring.sync(false);
 
-        let mut rx_ring = rx.ring.unwrap();
-        let mut tx_ring = tx.ring.unwrap();
+        let mut rx_ring = rx
+            .ring
+            .expect(&format!("RX ring is not available in queue: {}", queue));
+        let mut tx_ring = tx
+            .ring
+            .expect(&format!("TX ring is not available in queue: {}", queue));
         rx_ring.sync(false);
 
         while !cancellation_token.is_cancelled() {
