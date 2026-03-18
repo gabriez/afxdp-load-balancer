@@ -13,6 +13,7 @@ const MAX_PORT: u16 = 60999;
 
 /// PortsPool structure to manage the pool of available ports for NAT entries. It keeps track of the maximum number of ports and the number of ports currently available.
 /// It provides methods to get a port from the pool and release a port back to the pool.
+/// Ports are stored in big endian so we don't to transform them in the router
 #[derive(Debug)]
 pub struct PortsPool {
     max_ports: usize,
@@ -24,9 +25,9 @@ impl PortsPool {
     pub fn new(min_port: u16, max_port: u16) -> Self {
         let capacity = (max_port - min_port + 1) as usize;
         let mut ports = Vec::with_capacity(capacity);
-        // TODO: check if I should convert to big endian
+
         for i in 0..capacity {
-            ports.push(Some(min_port + i as u16));
+            ports.push(Some((min_port + i).to_be() as u16));
         }
         Self {
             max_ports: capacity,

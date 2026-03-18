@@ -2,7 +2,8 @@ use std::collections::{HashMap, HashSet};
 
 use fastrand::usize;
 /// This file contains logic related to load balancing client requests across multiple backend servers
-/// here is the core logic that decides which backend server to use for a given client request
+/// here is the core logic that decides which backend server to use for a given client request.
+/// We store port addresses in big endian to avoid converting them every time we need to use them for routing packets, because in the router we need to convert them to big endian format anyway, so we can save some CPU cycles by storing them in big endian format from the beginning.
 
 #[derive(Debug, Clone, Default)]
 pub struct Backends {
@@ -13,10 +14,13 @@ pub struct Backends {
     backends: Vec<([u8; 4], u16)>,
 }
 
-// TODO: check if I should convert to big endian
 impl Backends {
     pub fn new(backends_unfilter: Vec<([u8; 4], u16)>) -> Self {
-        let filtered_backends = backends_unfilter.into_iter().collect::<HashSet<_>>();
+        let filtered_backends = backends_unfilter
+            .into_iter()
+            .map(|(ip, port)| (ip, port.to_be()))
+            .collect::<HashSet<_>>();
+
         let counter = filtered_backends
             .iter()
             .map(|&backend| (backend, 0))
@@ -27,12 +31,15 @@ impl Backends {
 
     /// Returns a clone of the current list of backends and their active connection counts. This method is useful for retrieving the current state of the backends without modifying it.
     pub fn list_backends(&self) -> HashMap<([u8; 4], u16), u32> {
-        self.counter.clone()
+        self.counter
+            .iter()
+            .map(|((ip, port), count)| ((ip, u16::from_be(*port)), count))
+            .collect()
     }
 
     /// This functions adds a backend into the backends vector if it is not already present.
     pub fn add_backend(&mut self, ip: [u8; 4], port: u16) {
-        let backend_address = (ip, port);
+        let backend_address = (ip, port.to_be());
 
         if self.counter.contains_key(&backend_address) {
             return;
@@ -43,8 +50,9 @@ impl Backends {
     }
 
     /// This functions removes a backend from the backends vector.
+    /// The port does not require to be in big endian format, because we convert it to big endian format before comparing it with the backend addresses stored in the backends vector.
     pub fn remove_backend(&mut self, ip: [u8; 4], port: u16) {
-        let backend_address = (ip, port);
+        let backend_address = (ip, port.to_be());
         self.backends.retain(|addr| *addr != backend_address);
     }
 
@@ -84,9 +92,11 @@ pub trait BackendSelector {
     fn backend_exist(&self, ip: [u8; 4], port: u16) -> bool;
 
     /// Decrease quantity of active connections in backend
+    /// It requires port to be in big endian format because the backends are stored in big endian format.
     fn decrease_conn(&mut self, ip: [u8; 4], port: u16);
 
     /// Increase quantity of active connections in backend
+    /// It requires port to be in big endian format because the backends are stored in big endian format.
     fn increase_conn(&mut self, ip: [u8; 4], port: u16);
 }
 

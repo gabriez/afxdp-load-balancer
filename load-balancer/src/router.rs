@@ -43,6 +43,7 @@ pub fn shift_mac(eth_hdr: &mut EthHdr) {
 // To implement checksum update I'm using internet-checksum. This crate is optimized to calculate checksums efficiently and take advantage of CPU.
 // You can check the code on the following link https://docs.rs/internet-checksum/0.2.1/src/internet_checksum/lib.rs.html
 /// Route the packet by modifying the destination IP address and port in the IPv4 and TCP headers, respectively. It also updates the checksums accordingly.
+/// port_dest and port_origin should be in big endian.
 #[inline(always)]
 pub fn route_packet(
     ipv4_hdr: &mut Ipv4Hdr,
@@ -64,8 +65,8 @@ pub fn route_packet(
     let old_source_port = tcp_hdr.source;
     let mut old_csum_tcp_bytes = tcp_hdr.check.to_be_bytes();
 
-    tcp_hdr.source = port_origin.to_be();
-    tcp_hdr.dest = port_dest.to_be();
+    tcp_hdr.source = port_origin;
+    tcp_hdr.dest = port_dest;
 
     old_csum_tcp_bytes = update(
         old_csum_tcp_bytes,
